@@ -91,7 +91,7 @@ bool __read_mostly enable_unrestricted_guest = 1;
 module_param_named(unrestricted_guest,
 			enable_unrestricted_guest, bool, S_IRUGO);
 
-bool __read_mostly enable_ept_ad_bits = 1;
+bool __read_mostly enable_ept_ad_bits = 0; /* GVM add 1->0 */
 module_param_named(eptad, enable_ept_ad_bits, bool, S_IRUGO);
 
 static bool __read_mostly emulate_invalid_guest_state = true;
