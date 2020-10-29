@@ -36,7 +36,8 @@ extern bool kvm_dsm_dbg_verbose;
 	pr_err("kvm-dsm [%i]: %s: " fmt, task_pid_nr(current), __func__, \
 	## __VA_ARGS__)
 #define dsm_info(fmt, ...) \
-	pr_info("kvm-dsm [%i]: " fmt, task_pid_nr(current), ## __VA_ARGS__)
+	pr_info("kvm-dsm [%i]: %s: " fmt, task_pid_nr(current), __func__, \
+	## __VA_ARGS__)
 
 #define ACC_EXEC_MASK    1
 #define ACC_WRITE_MASK   PT_WRITABLE_MASK

@@ -10287,15 +10287,6 @@ static int kvm_alloc_memslot_metadata(struct kvm_memory_slot *slot,
 	if (kvm_page_track_create_memslot(slot, npages))
 		goto out_free;
 
-	/* GVM add begin */
-	dsm_info("%s: calling kvm_dsm_register_memslot_hva with npages = %lu\n",
-		__func__, npages);
-	if (kvm_dsm_register_memslot_hva(kvm, slot, npages)) {
-		kvm_page_track_free_memslot(slot, NULL);
-		goto out_free;
-	}
-	/* GVM add end */
-
 	return 0;
 
 out_free:
@@ -10332,34 +10323,30 @@ int kvm_arch_prepare_memory_region(struct kvm *kvm,
 				const struct kvm_userspace_memory_region *mem,
 				enum kvm_mr_change change)
 {
-	if (change == KVM_MR_CREATE || change == KVM_MR_MOVE)
-		return kvm_alloc_memslot_metadata(memslot,
-						  mem->memory_size >> PAGE_SHIFT);
-	return 0;
+	/* GVM add, refactored this function */
+	int ret;
+	int npages = mem->memory_size >> PAGE_SHIFT;
 
-#if 0
-	// This is from 5.4.y
-	/* GVM add begin: used to return 0 */
-	if (change == KVM_MR_DELETE || change == KVM_MR_FLAGS_ONLY)
-		return 0;
-	/* GVM add end */
+	if (change == KVM_MR_CREATE || change == KVM_MR_MOVE) {
+		ret = kvm_alloc_memslot_metadata(memslot, npages);
+		if (ret)
+			return ret;
 
-	/* GVM add begin follow up, comment this out */
-	//if (change == KVM_MR_MOVE)
-	//	return kvm_arch_create_memslot(kvm, memslot,
-	//				       mem->memory_size >> PAGE_SHIFT);
+		/* GVM add begin */
+		//dsm_info("calling kvm_dsm_register_memslot_hva base_gfn=0x%llX npages=%lu userspace_addr=%lu\n", memslot->base_gfn, memslot->npages, memslot->userspace_addr);
+		ret = kvm_dsm_register_memslot_hva(kvm, memslot, npages);
+		if (ret) {
+			kvm_page_track_free_memslot(memslot);
+			return ret;
+		}
+		/* GVM add end */
 
-	if (change == KVM_MR_CREATE) {
-		dsm_info("%s: KVM_MR_CREATE\n", __func__);
-	} else if (change == KVM_MR_MOVE) {
-		dsm_info("%s: KVM_MR_MOVE\n", __func__);
+		//dsm_info("calling kvm_dsm_add_memslot base_gfn=0x%llX npages=%lu userspace_addr=%lu\n", memslot->base_gfn, memslot->npages, memslot->userspace_addr);
+		return kvm_dsm_add_memslot(kvm, memslot, mem->slot >> 16);
 	}
 
-	kvm_info("%s: calling kvm_dsm_add_memslot with mem->slot >> 16 (called as_id) = %lu\n",
-		__func__, mem->slot >> 16);
-	return kvm_dsm_add_memslot(kvm, memslot, mem->slot >> 16); /* GVM add used to return 0 */
-	/* GVM add end follow up */
-#endif
+	return 0;
+	/* GVM add end */
 }
 
 static void kvm_mmu_slot_apply_flags(struct kvm *kvm,
@@ -10697,12 +10684,12 @@ static inline int apf_put_user_notpresent(struct kvm_vcpu *vcpu)
 
 	/* GVM add begin: used to return kvm_write_guest_cached */
 	ret = kvm_dsm_vcpu_acquire(vcpu, &slots, vcpu->arch.apf.data.gpa,
-			sizeof(val), true);
+			sizeof(reason), true);
 	if (ret < 0)
 		return ret;
 	ret = kvm_write_guest_cached(vcpu->kvm, &vcpu->arch.apf.data, &reason,
 				      sizeof(reason));
-	kvm_dsm_vcpu_release(vcpu, slots, vcpu->arch.apf.data.gpa, sizeof(val));
+	kvm_dsm_vcpu_release(vcpu, slots, vcpu->arch.apf.data.gpa, sizeof(reason));
 	return ret;
 	/* GVM add end */
 }

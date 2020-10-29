@@ -92,6 +92,379 @@ out_free:
 	return ret;
 }
 
+/* GVM porting modifications */
+static struct kmem_cache *dsm_pte_list_desc_cache;
+
+/* TODO:
+ * add vcpu->arch.mmu_pte_list_desc_cache.kmem_cache = pte_list_desc_cache;
+ * to a create function
+ */
+
+struct dsm_pte_list_desc;
+struct dsm_pte_list_desc {
+	#define DSM_PTE_LIST_EXT 3 /* See x86/kvm/mmu.c PTE_LIST_EXT */
+
+	u64 *sptes[DSM_PTE_LIST_EXT];
+	struct dsm_pte_list_desc *more;
+};
+
+static struct dsm_pte_list_desc *dsm_alloc_pte_list_desc(void)
+{
+	return kmem_cache_zalloc(dsm_pte_list_desc_cache, GFP_KERNEL);
+}
+
+/*
+ * Returns the number of pointers in the rmap chain, not counting the new one.
+ */
+static int dsm_pte_list_add(struct kvm_vcpu *vcpu, u64 *spte, struct kvm_dsm_rmap_head *rmap_head)
+{
+	struct dsm_pte_list_desc *desc;
+	int i, count = 0;
+
+	if (!rmap_head->val) {
+		//rmap_printk("pte_list_add: %p %llx 0->1\n", spte, *spte);
+		rmap_head->val = (unsigned long)spte;
+	} else if (!(rmap_head->val & 1)) {
+		//rmap_printk("pte_list_add: %p %llx 1->many\n", spte, *spte);
+		/* GVM add begin */
+		//desc = dsm_alloc_pte_list_desc(vcpu);
+		desc = dsm_alloc_pte_list_desc();
+		if (!desc) {
+			return -ENOMEM;
+		}
+		/* GVM add end */
+		desc->sptes[0] = (u64 *)rmap_head->val;
+		desc->sptes[1] = spte;
+		rmap_head->val = (unsigned long)desc | 1;
+		++count;
+	} else {
+		//rmap_printk("pte_list_add: %p %llx many->many\n", spte, *spte);
+		desc = (struct dsm_pte_list_desc *)(rmap_head->val & ~1ul);
+		while (desc->sptes[DSM_PTE_LIST_EXT-1] && desc->more) {
+			desc = desc->more;
+			count += DSM_PTE_LIST_EXT;
+		}
+		if (desc->sptes[DSM_PTE_LIST_EXT-1]) {
+			/* GVM add begin */
+			//desc->more = dsm_alloc_pte_list_desc(vcpu);
+			desc->more = dsm_alloc_pte_list_desc();
+			if (!desc->more) {
+				return -ENOMEM;
+			}
+			/* GVM add end */
+			desc = desc->more;
+		}
+		for (i = 0; desc->sptes[i]; ++i)
+			++count;
+		desc->sptes[i] = spte;
+	}
+	return count;
+}
+
+static void
+dsm_pte_list_desc_remove_entry(struct kvm_dsm_rmap_head *rmap_head,
+			   struct dsm_pte_list_desc *desc, int i,
+			   struct dsm_pte_list_desc *prev_desc)
+{
+	int j;
+
+	for (j = DSM_PTE_LIST_EXT - 1; !desc->sptes[j] && j > i; --j)
+		;
+	desc->sptes[i] = desc->sptes[j];
+	desc->sptes[j] = NULL;
+	if (j != 0)
+		return;
+	if (!prev_desc && !desc->more)
+		rmap_head->val = 0;
+	else
+		if (prev_desc)
+			prev_desc->more = desc->more;
+		else
+			rmap_head->val = (unsigned long)desc->more | 1;
+	//mmu_free_pte_list_desc(desc);
+	kmem_cache_free(dsm_pte_list_desc_cache, desc);
+}
+
+static void dsm_pte_list_remove(u64 *spte, struct kvm_dsm_rmap_head *rmap_head)
+{
+	struct dsm_pte_list_desc *desc;
+	struct dsm_pte_list_desc *prev_desc;
+	int i;
+
+	if (!rmap_head->val) {
+		pr_err("%s: %p 0->BUG\n", __func__, spte);
+		BUG();
+	} else if (!(rmap_head->val & 1)) {
+		//rmap_printk("%s:  %p 1->0\n", __func__, spte);
+		if ((u64 *)rmap_head->val != spte) {
+			pr_err("%s:  %p 1->BUG\n", __func__, spte);
+			BUG();
+		}
+		rmap_head->val = 0;
+	} else {
+		//rmap_printk("%s:  %p many->many\n", __func__, spte);
+		desc = (struct dsm_pte_list_desc *)(rmap_head->val & ~1ul);
+		prev_desc = NULL;
+		while (desc) {
+			for (i = 0; i < DSM_PTE_LIST_EXT && desc->sptes[i]; ++i) {
+				if (desc->sptes[i] == spte) {
+					dsm_pte_list_desc_remove_entry(rmap_head,
+							desc, i, prev_desc);
+					return;
+				}
+			}
+			prev_desc = desc;
+			desc = desc->more;
+		}
+		pr_err("%s: %p many->many\n", __func__, spte);
+		BUG();
+	}
+}
+
+/*
+ * The pte_list_add used for gfn->spte rmaps will never return -ENOMEM, since
+ * the pte_list_desc structs are preallocated. But we don't do this for
+ * vfn->gfn rmaps, so it can return -ENOMEM.
+ */
+static inline int dsm_gfn_list_add(gfn_t gfn, struct kvm_dsm_rmap_head *rmap_head)
+{
+	return dsm_pte_list_add(NULL, (u64 *)gfn, rmap_head);
+}
+
+static inline void dsm_gfn_list_remove(gfn_t gfn, struct kvm_dsm_rmap_head *rmap_head)
+{
+	dsm_pte_list_remove((u64 *)gfn, rmap_head);
+}
+
+/*
+ * gfn encoding: (real_gfn << 1) | GFN_PRESENT_MASK | (as_id ? GFN_SMM_MASK : 0)
+ */
+int kvm_dsm_rmap_add(struct kvm_dsm_memory_slot *slot, bool backup,
+		gfn_t gfn, hfn_t vfn, unsigned long npages)
+{
+	int ret = 0;
+	unsigned long i;
+	struct kvm_dsm_rmap_head *rmap_head;
+
+	mutex_lock(slot->rmap_lock);
+	for (i = 0; i < npages; i++, gfn += 2) {
+		rmap_head = backup ? &slot->backup_rmap[vfn++ - slot->base_vfn]
+			: &slot->rmap[vfn++ - slot->base_vfn];
+		ret = dsm_gfn_list_add(gfn, rmap_head);
+		if (ret < 0)
+			break;
+	}
+	if (ret >= 0) {
+		ret = 0;
+		goto out;
+	}
+
+	gfn -= 2;
+	for (; i != ULONG_MAX; i--, gfn -= 2) {
+		rmap_head = backup ? &slot->backup_rmap[--vfn - slot->base_vfn]
+			: &slot->rmap[--vfn - slot->base_vfn];
+		dsm_gfn_list_remove(gfn, rmap_head);
+	}
+
+out:
+	mutex_unlock(slot->rmap_lock);
+	return ret;
+}
+
+void kvm_dsm_rmap_remove(struct kvm_dsm_memory_slot *slot, bool backup,
+		gfn_t gfn, hfn_t vfn, unsigned long npages)
+{
+	unsigned long i;
+	struct kvm_dsm_rmap_head *rmap_head;
+
+	mutex_lock(slot->rmap_lock);
+	for (i = 0; i < npages; i++, gfn += 2) {
+		rmap_head = backup ? &slot->backup_rmap[vfn++ - slot->base_vfn]
+			: &slot->rmap[vfn++ - slot->base_vfn];
+		if (!rmap_head->val)
+			continue;
+		dsm_gfn_list_remove(gfn, rmap_head);
+	}
+	mutex_unlock(slot->rmap_lock);
+}
+
+struct dsm_rmap_iterator {
+	/* private fields */
+	struct dsm_pte_list_desc *desc;	/* holds the sptep if not NULL */
+	int pos;			/* index of the sptep */
+};
+
+static u64 *dsm_rmap_get_first(struct kvm_dsm_rmap_head *rmap_head,
+			   struct dsm_rmap_iterator *iter) /* GVM add and rename to __rmap_get_first */
+{
+	u64 *sptep;
+
+	if (!rmap_head->val)
+		return NULL;
+
+	if (!(rmap_head->val & 1)) {
+		iter->desc = NULL;
+		sptep = (u64 *)rmap_head->val;
+		goto out;
+	}
+
+	iter->desc = (struct dsm_pte_list_desc *)(rmap_head->val & ~1ul);
+	iter->pos = 0;
+	sptep = iter->desc->sptes[iter->pos];
+out:
+	return sptep;
+}
+
+static u64 *dsm_rmap_get_next(struct dsm_rmap_iterator *iter)
+{
+	u64 *sptep;
+
+	if (iter->desc) {
+		if (iter->pos < DSM_PTE_LIST_EXT - 1) {
+			++iter->pos;
+			sptep = iter->desc->sptes[iter->pos];
+			if (sptep)
+				goto out;
+		}
+
+		iter->desc = iter->desc->more;
+
+		if (iter->desc) {
+			iter->pos = 0;
+			/* desc->sptes[0] cannot be NULL */
+			sptep = iter->desc->sptes[iter->pos];
+			goto out;
+		}
+	}
+
+	return NULL;
+out:
+	return sptep;
+}
+
+void kvm_dsm_free_rmap(struct kvm_dsm_memory_slot *slot)
+{
+	int i;
+	u64 *entry;
+	struct dsm_rmap_iterator iter;
+
+	for (i = 0; i < slot->npages; i++) {
+		while ((entry = dsm_rmap_get_first(&slot->backup_rmap[i], &iter))) {
+			dsm_pte_list_remove(entry, &slot->backup_rmap[i]);
+		}
+		while ((entry = dsm_rmap_get_first(&slot->rmap[i], &iter))) {
+			dsm_pte_list_remove(entry, &slot->rmap[i]);
+		}
+	}
+}
+
+#define for_each_dsm_rmap_spte(_rmap_head_, _iter_, _spte_)		\
+	for (_spte_ = dsm_rmap_get_first(_rmap_head_, _iter_);	\
+	     _spte_; _spte_ = dsm_rmap_get_next(_iter_))
+
+
+/*
+ * Return gfns mapped to given vfn.
+ * @backup: Which rmap should be used.
+ * @is_smm: Whether returned gfn is in SMM mode. It can be NULL.
+ * @iter_idx: Iteration index. If it's NULL, this function return the first
+ * (should better be treated as a random one) gfn.
+ * If you want to traverse the whole gfn list, you can use the following code:
+ * int iter_idx = 0;
+ * while (iter_idx >= 0) {
+ *     gfn = kvm_dsm_vfn_to_gfn(slot, vfn, NULL, &iter_idx);
+ *     // do something with gfn
+ * }
+ * @return ~0 on not found
+ */
+gfn_t kvm_dsm_vfn_to_gfn(struct kvm_dsm_memory_slot *slot, bool backup, hfn_t vfn,
+		bool *is_smm, int *iter_idx)
+{
+	u64 *entry;
+	gfn_t gfn = ~0;
+	struct dsm_rmap_iterator iter;
+	int count = 0;
+	struct kvm_dsm_rmap_head *rmap_head;
+
+	rmap_head = backup ? &slot->backup_rmap[vfn - slot->base_vfn]
+		: &slot->rmap[vfn - slot->base_vfn];
+
+	mutex_lock(slot->rmap_lock);
+	for_each_dsm_rmap_spte(rmap_head, &iter, entry) {
+		gfn = (gfn_t)entry;
+		if (is_smm)
+			*is_smm = gfn & GFN_SMM_MASK;
+		gfn = (gfn & (~(GFN_PRESENT_MASK | GFN_SMM_MASK))) >> 1;
+		if (!iter_idx)
+			goto out;
+		if (count++ == *iter_idx) {
+			*iter_idx = count;
+			goto out;
+		}
+	}
+	if (iter_idx)
+		*iter_idx = -1;
+out:
+	mutex_unlock(slot->rmap_lock);
+	return gfn;
+}
+
+// HACK
+bool kvm_mmu_slot_gfn_write_protect(struct kvm *kvm, struct kvm_memory_slot *slot, u64 gfn);
+struct kvm_rmap_head *__gfn_to_rmap(gfn_t gfn, int level, struct kvm_memory_slot *slot);
+bool kvm_zap_rmapp(struct kvm *kvm, struct kvm_rmap_head *rmap_head);
+
+void kvm_dsm_apply_access_right(struct kvm *kvm,
+		struct kvm_dsm_memory_slot *slot, hfn_t vfn, unsigned long dsm_access)
+{
+	u64 *entry;
+	gfn_t gfn;
+	bool is_smm;
+	struct kvm_memory_slot *memslot;
+	struct dsm_rmap_iterator iter;
+	struct kvm_dsm_rmap_head *rmap_head;
+	bool flush = false;
+
+	dsm_debug_v("kvm[%d] set vfn[%llu] to dsm_access[%lu]", kvm->arch.dsm_id,
+			vfn, dsm_access);
+
+	/*
+	 * This should rarely race since we almost always do the memslot
+	 * manipulation at the initialization stage and never modify them
+	 * afterwards. The most likely cause of race would be concurrent accesses
+	 * to a dual-port MMIO device.
+	 */
+	mutex_lock(slot->rmap_lock);
+	spin_lock(&kvm->mmu_lock);
+	for_each_dsm_rmap_spte(&slot->rmap[vfn - slot->base_vfn], &iter, entry) {
+		gfn = (gfn_t) entry;
+		is_smm = gfn & GFN_SMM_MASK;
+		gfn = (gfn & (~(GFN_PRESENT_MASK | GFN_SMM_MASK))) >> 1;
+		memslot = __gfn_to_memslot(__kvm_memslots(kvm, is_smm), gfn);
+		if (!memslot)
+			continue;
+		switch (dsm_access) {
+			case DSM_INVALID:
+			case DSM_MODIFIED: /* should build spte in set_spte */
+				/* Currently we disable large page in DSM mode */
+				// GVM porting add C-style cast.
+				rmap_head = (struct kvm_dsm_rmap_head *)__gfn_to_rmap(gfn, PG_LEVEL_4K, memslot);
+				flush |= kvm_zap_rmapp(kvm, (struct kvm_rmap_head *)rmap_head);
+				break;
+			case DSM_SHARED:
+				flush |= kvm_mmu_slot_gfn_write_protect(kvm, memslot, gfn);
+				break;
+			default:
+				break;
+		}
+	}
+	if (flush)
+		kvm_flush_remote_tlbs(kvm);
+	spin_unlock(&kvm->mmu_lock);
+	mutex_unlock(slot->rmap_lock);
+}
+/* GVM end porting modifications */
+
 /* This should happen before the new memslot is added to kvm_memslots */
 int kvm_dsm_add_memslot(struct kvm *kvm, struct kvm_memory_slot *slot,
 		int as_id)
@@ -114,7 +487,7 @@ int kvm_dsm_add_memslot(struct kvm *kvm, struct kvm_memory_slot *slot,
 			iter_idx = 0;
 			while (iter_idx >= 0) {
 				bool is_smm;
-				gfn_iter = __kvm_dsm_vfn_to_gfn(hvaslot, true, hvaslot->base_vfn,
+				gfn_iter = kvm_dsm_vfn_to_gfn(hvaslot, true, hvaslot->base_vfn,
 						&is_smm, &iter_idx);
 				if (!!is_smm == !!as_id && gfn_iter <= gfn && gfn_iter +
 						hvaslot->npages > gfn) {
@@ -638,6 +1011,21 @@ int kvm_dsm_alloc(struct kvm *kvm)
 	if (!kvm->arch.dsm_hvaslots)
 		return -ENOMEM;
 
+	/* GVM porting */
+	dsm_pte_list_desc_cache = kmem_cache_create("dsm_pte_list_desc",
+		sizeof(struct dsm_pte_list_desc), 0, SLAB_ACCOUNT, NULL);
+	if (!dsm_pte_list_desc_cache) {
+		dsm_info("failed to kmem_cache_create dsm_pte_list_desc\n");
+		return -ENOMEM;
+	}
+	//dsm_info("dsm_pte_list_desc_cache=0x%p\n", dsm_pte_list_desc_cache);
+	// TODO free if there is an error below.
+
+	/* GVM porting */
+	//kvm->arch.dsm_pte_list_desc_cache.kmem_cache = dsm_pte_list_desc_cache;
+	//kvm->arch.dsm_pte_list_desc_cache.gfp_zero = __GFP_ZERO;
+
+
 	return 0;
 }
 
@@ -692,6 +1080,10 @@ void kvm_dsm_free(struct kvm *kvm)
 		kvfree(slots->memslots[i].rmap_lock);
 	}
 	kvfree(slots);
+
+	//kvm_mmu_free_memory_cache(&kvm->arch.dsm_pte_list_desc_cache);
+	kmem_cache_destroy(dsm_pte_list_desc_cache);
+
 	dsm_info("node-%d slots freed\n", kvm->arch.dsm_id);
 }
 
@@ -706,6 +1098,8 @@ static int kvm_dsm_page_fault(struct kvm *kvm, struct kvm_memory_slot *memslot,
 	getnstimeofday(&ts);
 	start = ts.tv_sec * 1000 * 1000 + ts.tv_nsec / 1000;
 #endif
+
+	//dsm_info("gfn=0x%llX base_gfn=0x%llX npages=%lu userspace_addr=0x%lX w=%d\n", gfn, memslot->base_gfn, memslot->npages, memslot->userspace_addr, write);
 
 #ifdef IVY_KVM_DSM
 	ret = ivy_kvm_dsm_page_fault(kvm, memslot, gfn, is_smm, write);
@@ -758,7 +1152,7 @@ int kvm_dsm_memcpy(struct kvm *kvm, unsigned long host_virt_addr,
 		}
 
 		for (i = 0; i < npages; i += gfn_npages) {
-			gfn = __kvm_dsm_vfn_to_gfn(slot, false, vfn + i, &is_smm, NULL);
+			gfn = kvm_dsm_vfn_to_gfn(slot, false, vfn + i, &is_smm, NULL);
 			memslot = __gfn_to_memslot(__kvm_memslots(kvm, is_smm), gfn);
 			gfn_npages = min(npages - i, (unsigned long)(memslot->base_gfn +
 						memslot->npages - gfn));
@@ -845,7 +1239,7 @@ int kvm_dsm_mempin(struct kvm *kvm, unsigned long host_virt_addr,
 		}
 
 		for (i = 0; i < npages; i += gfn_npages) {
-			gfn = __kvm_dsm_vfn_to_gfn(slot, false, vfn + i, &is_smm, NULL);
+			gfn = kvm_dsm_vfn_to_gfn(slot, false, vfn + i, &is_smm, NULL);
 			memslot = __gfn_to_memslot(__kvm_memslots(kvm, is_smm), gfn);
 			gfn_npages = min(npages - i, (unsigned long)(memslot->base_gfn +
 						memslot->npages - gfn));

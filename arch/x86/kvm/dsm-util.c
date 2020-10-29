@@ -44,6 +44,7 @@ int dsm_create_memslot(struct kvm_dsm_memory_slot *slot,
 	unsigned long i;
 	int ret = 0;
 
+	//dsm_info("base_vfn=0x%llX npages=%lu\n", slot->base_vfn, npages);
 	slot->vfn_dsm_state = kvzalloc(npages * sizeof(*slot->vfn_dsm_state), GFP_KERNEL_ACCOUNT);
 	if (!slot->vfn_dsm_state)
 		return -ENOMEM;
@@ -123,7 +124,7 @@ void dsm_lock(struct kvm *kvm, struct kvm_dsm_memory_slot *slot, hfn_t vfn)
 		retry_cnt++;
 		/* ~10s */
 		if (retry_cnt > 1000000) {
-			gfn_t gfn = __kvm_dsm_vfn_to_gfn(slot, false, vfn, NULL, NULL);
+			gfn_t gfn = kvm_dsm_vfn_to_gfn(slot, false, vfn, NULL, NULL);
 			get_task_comm(cur_comm, current);
 #ifdef CONFIG_DEBUG_MUTEXES
 			get_task_comm(lock_owner_comm, slot->vfn_dsm_state[vfn -
@@ -288,9 +289,9 @@ int kvm_read_guest_page_nonlocal(struct kvm *kvm,
 {
 	int ret = 0;
 
-	use_mm(kvm->mm);
+	kthread_use_mm(kvm->mm);
 	ret = __kvm_read_guest_page(slot, gfn, data, offset, len);
-	unuse_mm(kvm->mm);
+	kthread_unuse_mm(kvm->mm);
 	return ret;
 }
 
@@ -300,9 +301,9 @@ int kvm_write_guest_page_nonlocal(struct kvm *kvm,
 {
 	int ret = 0;
 
-	use_mm(kvm->mm);
+	kthread_use_mm(kvm->mm);
 	ret = __kvm_write_guest_page(slot, gfn, data, offset, len);
-	unuse_mm(kvm->mm);
+	kthread_unuse_mm(kvm->mm);
 	return ret;
 }
 
@@ -377,7 +378,7 @@ void kvm_dsm_report_profile(struct kvm *kvm)
 					read_most[i].write_pf = info->write_pf;
 					read_most[i].rip = info->rip;
 					read_most[i].vfn = slot->base_vfn + k;
-					read_most[i].gfn = __kvm_dsm_vfn_to_gfn(slot, false,
+					read_most[i].gfn = kvm_dsm_vfn_to_gfn(slot, false,
 							slot->base_vfn + k, &read_most[i].is_smm, NULL);
 				}
 				if (info->write_pf > write_faults && (i == 0 ||
@@ -387,7 +388,7 @@ void kvm_dsm_report_profile(struct kvm *kvm)
 					write_most[i].write_pf = info->write_pf;
 					write_most[i].rip = info->rip;
 					write_most[i].vfn = slot->base_vfn + k;
-					write_most[i].gfn = __kvm_dsm_vfn_to_gfn(slot, false,
+					write_most[i].gfn = kvm_dsm_vfn_to_gfn(slot, false,
 							slot->base_vfn + k, &write_most[i].is_smm, NULL);
 				}
 			}

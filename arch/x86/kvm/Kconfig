@@ -113,7 +113,7 @@ config KVM_DSM
 	bool "KVM distributed software memory support"
 	depends on KVM && KVM_INTEL
 	default n
-	---help---
+	help
 	  Provide support for distributed software memory inside KVM, which allows
 	  userspace to implement distributed hypervisors.
 # GVM add end
