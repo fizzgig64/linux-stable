@@ -21,6 +21,8 @@
 
 #include "trace.h"
 
+#include "dsm.h" /* GVM add */
+
 static pgd_t *boot_hyp_pgd;
 static pgd_t *hyp_pgd;
 static pgd_t *merged_hyp_pgd;
@@ -445,7 +447,8 @@ static void stage2_flush_p4ds(struct kvm_s2_mmu *mmu, pgd_t *pgd,
 	} while (p4d++, addr = next, addr != end);
 }
 
-static void stage2_flush_memslot(struct kvm *kvm,
+/* GVM add, remove static */
+void stage2_flush_memslot(struct kvm *kvm,
 				 struct kvm_memory_slot *memslot)
 {
 	struct kvm_s2_mmu *mmu = &kvm->arch.mmu;
@@ -1675,7 +1678,7 @@ void kvm_mmu_wp_memory_region(struct kvm *kvm, int slot)
  * Walks bits set in mask write protects the associated pte's. Caller must
  * acquire kvm_mmu_lock.
  */
-static void kvm_mmu_write_protect_pt_masked(struct kvm *kvm,
+void kvm_mmu_write_protect_pt_masked(struct kvm *kvm,
 		struct kvm_memory_slot *slot,
 		gfn_t gfn_offset, unsigned long mask)
 {
@@ -1829,6 +1832,22 @@ transparent_hugepage_adjust(struct kvm_memory_slot *memslot,
 	return PAGE_SIZE;
 }
 
+/* GVM add begin */
+/*
+ * Bit 63 and 61 are used by EPT PTEs, and bit 62 is used to denote special
+ * SPTEs, currently MMIO SPTEs and Access Tracking SPTEs.
+ * 
+ * In ARM64 S2 the same bit 60 is unused.
+ */
+#define SPTE_DSM_WRITEABLE (1ULL << 60)
+
+static inline pte_t kvm_dsm_s2pte_mkdsm(pte_t pte)
+{
+	pte_val(pte) |= SPTE_DSM_WRITEABLE;
+	return pte;
+}
+/* GVM add end */
+
 static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 			  struct kvm_memory_slot *memslot, unsigned long hva,
 			  unsigned long fault_status)
@@ -1847,6 +1866,8 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 	bool logging_active = memslot_is_logging(memslot);
 	unsigned long vma_pagesize, flags = 0;
 	struct kvm_s2_mmu *mmu = vcpu->arch.hw_mmu;
+	struct kvm_memory_slot *slot; /* GVM add */
+	int dsm_access; /* GVM add */
 
 	write_fault = kvm_is_write_fault(vcpu);
 	exec_fault = kvm_vcpu_trap_is_exec_fault(vcpu);
@@ -1879,6 +1900,15 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 		vma_pagesize = PAGE_SIZE;
 		vma_shift = PAGE_SHIFT;
 	}
+
+/* GVM add begin */
+	/* Disable large pages for DSM */
+	if (vcpu->kvm->arch.dsm_enabled) {
+		force_pte = true;
+		vma_pagesize = PAGE_SIZE;
+		vma_shift = PAGE_SHIFT;
+	}
+/* GVM add end */
 
 	/*
 	 * The stage2 has a minimum of 2 level table (For arm64 see
@@ -1938,6 +1968,17 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 
 	if (exec_fault && is_iomap(flags))
 		return -ENOEXEC;
+
+/* GVM add begin */
+	// TODO, does this access need to flow or modify write/read/exec?
+	// Seems like ivy_kvm_dsm_page_fault only returns what was given in write.
+	// Maybe try passing write_fault then setting writable based on the response ACC_WRITE?
+	dsm_access = kvm_dsm_vcpu_acquire_page(vcpu, &slot, gfn, writable);
+	if (dsm_access < 0) {
+		kvm_release_pfn_clean(pfn);
+		return dsm_access;
+	}
+/* GVM add end */
 
 	spin_lock(&kvm->mmu_lock);
 	if (mmu_notifier_retry(kvm, mmu_seq))
@@ -2002,8 +2043,13 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 	} else {
 		pte_t new_pte = kvm_pfn_pte(pfn, mem_type);
 
+		if (!vcpu->kvm->arch.dsm_enabled) {
+			new_pte = kvm_dsm_s2pte_mkdsm(new_pte);
+		}
+
 		if (writable) {
 			new_pte = kvm_s2pte_mkwrite(new_pte);
+			new_pte = kvm_dsm_s2pte_mkdsm(new_pte);
 			mark_page_dirty(kvm, gfn);
 		}
 
@@ -2016,6 +2062,7 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 out_unlock:
 	spin_unlock(&kvm->mmu_lock);
 	kvm_set_pfn_accessed(pfn);
+	kvm_dsm_vcpu_release_page(vcpu, slot, gfn); /* GVM add */
 	kvm_release_pfn_clean(pfn);
 	return ret;
 }
@@ -2469,6 +2516,7 @@ int kvm_arch_prepare_memory_region(struct kvm *kvm,
 	hva_t reg_end = hva + mem->memory_size;
 	bool writable = !(mem->flags & KVM_MEM_READONLY);
 	int ret = 0;
+	int npages = mem->memory_size >> PAGE_SHIFT; /* GVM add */
 
 	if (change != KVM_MR_CREATE && change != KVM_MR_MOVE &&
 			change != KVM_MR_FLAGS_ONLY)
@@ -2479,8 +2527,11 @@ int kvm_arch_prepare_memory_region(struct kvm *kvm,
 	 * space addressable by the KVM guest IPA space.
 	 */
 	if (memslot->base_gfn + memslot->npages >=
-	    (kvm_phys_size(kvm) >> PAGE_SHIFT))
+	    (kvm_phys_size(kvm) >> PAGE_SHIFT)) {
+		dsm_info("Memory region outside of the IPA space base_gfn=%llu npages=%lu and kvm_phys_size(kvm) >> PAGE_SHIFT): %llu\n",
+			memslot->base_gfn, memslot->npages, kvm_phys_size(kvm) >> PAGE_SHIFT);
 		return -EFAULT;
+	}
 
 	mmap_read_lock(current->mm);
 	/*
@@ -2534,6 +2585,25 @@ int kvm_arch_prepare_memory_region(struct kvm *kvm,
 	if (change == KVM_MR_FLAGS_ONLY)
 		goto out;
 
+	//ret = kvm_alloc_memslot_metadata(memslot, npages);
+	//if (ret)
+	//	goto out;
+
+	/* GVM add begin */
+	//dsm_info("calling kvm_dsm_register_memslot_hva base_gfn=0x%llX npages=%lu userspace_addr=0x%lX\n", memslot->base_gfn, memslot->npages, memslot->userspace_addr);
+	ret = kvm_dsm_register_memslot_hva(kvm, memslot, npages);
+	if (ret) {
+		// kvm_arch_free_memslot(memslot); /* GVM arm64 porting, was track_free_memslot? */
+		goto out;
+	}
+	//dsm_info("calling kvm_dsm_add_memslot base_gfn=0x%llX npages=%lu userspace_addr=0x%lX\n", memslot->base_gfn, memslot->npages, memslot->userspace_addr);
+	ret = kvm_dsm_add_memslot(kvm, memslot, mem->slot >> 16);
+	if (ret) {
+		goto out;
+	}
+
+	/* GVM add end */
+
 	spin_lock(&kvm->mmu_lock);
 	if (ret)
 		unmap_stage2_range(&kvm->arch.mmu, mem->guest_phys_addr, mem->memory_size);
@@ -2563,6 +2633,8 @@ void kvm_arch_flush_shadow_memslot(struct kvm *kvm,
 {
 	gpa_t gpa = slot->base_gfn << PAGE_SHIFT;
 	phys_addr_t size = slot->npages << PAGE_SHIFT;
+
+	kvm_dsm_remove_memslot(kvm, slot); /* GVM add */
 
 	spin_lock(&kvm->mmu_lock);
 	unmap_stage2_range(&kvm->arch.mmu, gpa, size);

@@ -21,7 +21,11 @@
 #include <linux/kvm.h>
 #include "dsm-util.h"
 #include "ivy.h"
-#include "mmu.h"
+
+/* GVM arm64 porting begin */
+//#include "mmu.h"
+#include <asm/kvm_mmu.h>
+/* GVM arm64 porting end */
 
 #include <linux/kthread.h>
 #include <linux/mmu_context.h>

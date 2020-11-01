@@ -15,7 +15,12 @@
 
 #include <linux/kvm_host.h>
 #include <linux/kvm.h>
-#include "mmu.h"
+
+/* GVM arm64 porting begin */
+//#include "mmu.h"
+#include <asm/kvm_mmu.h>
+/* GVM arm64 porting end */
+
 #include "dsm.h" /* KVM_DSM_DEBUG */
 #include "dsm-util.h"
 #include "xbzrle.h"

@@ -42,6 +42,8 @@
 #include <kvm/arm_pmu.h>
 #include <kvm/arm_psci.h>
 
+#include "dsm.h" /* GVM add */
+
 #ifdef REQUIRES_VIRT
 __asm__(".arch_extension	virt");
 #endif
@@ -108,6 +110,12 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 {
 	int ret;
 
+	/* GVM add begin */
+	ret = kvm_dsm_alloc(kvm);
+	if (ret < 0)
+		return ret;
+	/* GVM add end */
+
 	ret = kvm_arm_setup_stage2(kvm, type);
 	if (ret)
 		return ret;
@@ -154,6 +162,8 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
 		}
 	}
 	atomic_set(&kvm->online_vcpus, 0);
+
+	kvm_dsm_free(kvm); /* GVM add */
 }
 
 int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
@@ -178,6 +188,9 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_ARM_IRQ_LINE_LAYOUT_2:
 	case KVM_CAP_ARM_NISV_TO_USER:
 	case KVM_CAP_ARM_INJECT_EXT_DABT:
+/* GVM add begin */
+	case KVM_CAP_X86_DSM:
+/* GVM add end */
 		r = 1;
 		break;
 	case KVM_CAP_ARM_SET_DEVICE_ADDR:
@@ -1254,8 +1267,13 @@ long kvm_arch_vm_ioctl(struct file *filp,
 
 		return 0;
 	}
-	default:
-		return -EINVAL;
+	default: {
+		/* GVM add begin, add scope and check for ENOTTY */
+		int r;
+		r = kvm_vm_ioctl_dsm(kvm, ioctl, arg);
+		return (r == -ENOTTY) ? -EINVAL : r;
+		/* GVM add end */
+	}
 	}
 }
 

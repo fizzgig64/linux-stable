@@ -40,8 +40,9 @@ extern bool kvm_dsm_dbg_verbose;
 	## __VA_ARGS__)
 
 #define ACC_EXEC_MASK    1
-#define ACC_WRITE_MASK   PT_WRITABLE_MASK
-#define ACC_USER_MASK    PT_USER_MASK
+#define ACC_WRITE_MASK   1 << 1 /* GVM arm64 porting */
+#define ACC_USER_MASK    1 << 2 /* GVM arm64 porting */
+/* GVM arm64 porting TODO, find a way to communicate these flags into user_mem_abort */
 #define ACC_ALL          (ACC_EXEC_MASK | ACC_WRITE_MASK | ACC_USER_MASK)
 
 struct kvm_network_ops {

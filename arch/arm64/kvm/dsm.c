@@ -16,7 +16,11 @@
 #include <linux/kvm_host.h>
 #include <linux/kvm.h>
 #include "dsm.h"
-#include "mmu.h"
+
+/* GVM arm64 porting begin */
+//#include "mmu.h"
+#include <asm/kvm_mmu.h>
+/* GVM arm64 porting end */
 
 #include <linux/kthread.h>
 #include <linux/mmu_context.h>
@@ -392,8 +396,9 @@ gfn_t kvm_dsm_vfn_to_gfn(struct kvm_dsm_memory_slot *slot, bool backup, hfn_t vf
 	mutex_lock(slot->rmap_lock);
 	for_each_dsm_rmap_spte(rmap_head, &iter, entry) {
 		gfn = (gfn_t)entry;
-		if (is_smm)
-			*is_smm = gfn & GFN_SMM_MASK;
+		if (is_smm) {
+			// *is_smm = gfn & GFN_SMM_MASK;
+		}
 		gfn = (gfn & (~(GFN_PRESENT_MASK | GFN_SMM_MASK))) >> 1;
 		if (!iter_idx)
 			goto out;
@@ -409,10 +414,14 @@ out:
 	return gfn;
 }
 
-// HACK
-bool kvm_mmu_slot_gfn_write_protect(struct kvm *kvm, struct kvm_memory_slot *slot, u64 gfn);
-struct kvm_rmap_head *__gfn_to_rmap(gfn_t gfn, int level, struct kvm_memory_slot *slot);
-bool kvm_zap_rmapp(struct kvm *kvm, struct kvm_rmap_head *rmap_head);
+// HACK for x86.
+//bool kvm_mmu_slot_gfn_write_protect(struct kvm *kvm, struct kvm_memory_slot *slot, u64 gfn);
+//struct kvm_rmap_head *__gfn_to_rmap(gfn_t gfn, int level, struct kvm_memory_slot *slot);
+//bool kvm_zap_rmapp(struct kvm *kvm, struct kvm_rmap_head *rmap_head);
+
+// HACK for arm64
+void stage2_flush_memslot(struct kvm *kvm, struct kvm_memory_slot *memslot);
+void kvm_mmu_write_protect_pt_masked(struct kvm *kvm, struct kvm_memory_slot *slot, gfn_t gfn_offset, unsigned long mask);
 
 void kvm_dsm_apply_access_right(struct kvm *kvm,
 		struct kvm_dsm_memory_slot *slot, hfn_t vfn, unsigned long dsm_access)
@@ -438,7 +447,7 @@ void kvm_dsm_apply_access_right(struct kvm *kvm,
 	spin_lock(&kvm->mmu_lock);
 	for_each_dsm_rmap_spte(&slot->rmap[vfn - slot->base_vfn], &iter, entry) {
 		gfn = (gfn_t) entry;
-		is_smm = gfn & GFN_SMM_MASK;
+		is_smm = false; // gfn & GFN_SMM_MASK;
 		gfn = (gfn & (~(GFN_PRESENT_MASK | GFN_SMM_MASK))) >> 1;
 		memslot = __gfn_to_memslot(__kvm_memslots(kvm, is_smm), gfn);
 		if (!memslot)
@@ -448,12 +457,23 @@ void kvm_dsm_apply_access_right(struct kvm *kvm,
 			case DSM_MODIFIED: /* should build spte in set_spte */
 				/* Currently we disable large page in DSM mode */
 				// GVM porting add C-style cast.
-				rmap_head = (struct kvm_dsm_rmap_head *)__gfn_to_rmap(gfn, PG_LEVEL_4K, memslot);
-				flush |= kvm_zap_rmapp(kvm, (struct kvm_rmap_head *)rmap_head);
+
+				// TODO find solution for arm64
+				//rmap_head = (struct kvm_dsm_rmap_head *)__gfn_to_rmap(gfn, PG_LEVEL_4K, memslot);
+				//flush |= kvm_zap_rmapp(kvm, (struct kvm_rmap_head *)rmap_head);
+				stage2_flush_memslot(kvm, memslot);
+				flush = true;
+
 				break;
-			case DSM_SHARED:
-				flush |= kvm_mmu_slot_gfn_write_protect(kvm, memslot, gfn);
+			case DSM_SHARED: {
+				// TODO find solution for arm64
+				//flush |= kvm_mmu_slot_gfn_write_protect(kvm, memslot, gfn);
+				unsigned long mask = -1;
+				kvm_mmu_write_protect_pt_masked(kvm, memslot, gfn, mask);
+				flush = true;
+
 				break;
+			}
 			default:
 				break;
 		}
@@ -486,7 +506,7 @@ int kvm_dsm_add_memslot(struct kvm *kvm, struct kvm_memory_slot *slot,
 			hvaslot = &slots->memslots[i];
 			iter_idx = 0;
 			while (iter_idx >= 0) {
-				bool is_smm;
+				bool is_smm = false;
 				gfn_iter = kvm_dsm_vfn_to_gfn(hvaslot, true, hvaslot->base_vfn,
 						&is_smm, &iter_idx);
 				if (!!is_smm == !!as_id && gfn_iter <= gfn && gfn_iter +
@@ -521,9 +541,9 @@ int kvm_dsm_add_memslot(struct kvm *kvm, struct kvm_memory_slot *slot,
 #endif
 		}
 	
-		kvm_dsm_rmap_remove(hvaslot, true, (gfn << 1) | GFN_PRESENT_MASK |
-				(as_id ? GFN_SMM_MASK : 0), hvaslot->base_vfn + (gfn -
-				gfn_iter), npages);
+		kvm_dsm_rmap_remove(hvaslot, true,
+				(gfn << 1) | GFN_PRESENT_MASK /* | (as_id ? GFN_SMM_MASK : 0) */,
+				hvaslot->base_vfn + (gfn - gfn_iter), npages);
 
 	}
 
@@ -535,8 +555,9 @@ int kvm_dsm_add_memslot(struct kvm *kvm, struct kvm_memory_slot *slot,
 			return 0;
 		npages = min(gfn_end - gfn, hvaslot->base_vfn + hvaslot->npages - vfn);
 
-		ret = kvm_dsm_rmap_add(hvaslot, false, (gfn << 1) | GFN_PRESENT_MASK |
-				(as_id ? GFN_SMM_MASK : 0), vfn, npages);
+		ret = kvm_dsm_rmap_add(hvaslot, false,
+				(gfn << 1) | GFN_PRESENT_MASK /* | (as_id ? GFN_SMM_MASK : 0) */,
+				vfn, npages);
 		if (ret < 0)
 			goto out_free;
 
@@ -596,11 +617,13 @@ out:
 			return;
 		npages = min(gfn_end - gfn, hvaslot->base_vfn + hvaslot->npages - vfn);
 
-		kvm_dsm_rmap_remove(hvaslot, false, (gfn << 1) | GFN_PRESENT_MASK |
-				(i ? GFN_SMM_MASK : 0), vfn, npages);
+		kvm_dsm_rmap_remove(hvaslot, false,
+				(gfn << 1) | GFN_PRESENT_MASK /* | (i ? GFN_SMM_MASK : 0) */,
+				vfn, npages);
 		/* Backup dsm state. */
-		kvm_dsm_rmap_add(hvaslot, true, (gfn << 1) | GFN_PRESENT_MASK |
-				(i ? GFN_SMM_MASK : 0), vfn, npages);
+		kvm_dsm_rmap_add(hvaslot, true,
+				(gfn << 1) | GFN_PRESENT_MASK /* | (i ? GFN_SMM_MASK : 0) */,
+				vfn, npages);
 
 	}
 }
@@ -661,7 +684,7 @@ int kvm_dsm_vcpu_acquire_page(struct kvm_vcpu *vcpu,
 	if (slot)
 		*slot = memslot;
 	return __kvm_dsm_acquire_page(vcpu->kvm, memslot,
-			gfn, is_smm(vcpu), write);
+			gfn, false /* is_smm(vcpu) */, write);
 }
 
 /*
@@ -737,7 +760,7 @@ int kvm_dsm_vcpu_acquire(struct kvm_vcpu *vcpu, struct kvm_memslots **slots,
 	for (gfn = gpa >> PAGE_SHIFT; gfn <= gfn_end; gfn++) {
 		slot = __gfn_to_memslot(memslots, gfn);
 		ret = __kvm_dsm_acquire_page(vcpu->kvm, slot,
-				gfn, is_smm(vcpu), write);
+				gfn, false /* is_smm(vcpu) */, write);
 		if (ret < 0)
 			goto out_release;
 	}

@@ -60,7 +60,7 @@ config KVM_ARM_PMU
 # GVM add begin
 config KVM_DSM
 	bool "KVM distributed software memory support"
-	depends on KVM && KVM_INTEL
+	depends on KVM
 	default n
 	help
 	  Provide support for distributed software memory inside KVM, which allows
