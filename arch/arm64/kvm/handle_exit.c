@@ -42,6 +42,11 @@ static int handle_hvc(struct kvm_vcpu *vcpu)
 	vcpu->stat.hvc_exit_stat++;
 
 	ret = kvm_hvc_call_handler(vcpu);
+
+	if (ret == 0) {
+		vcpu->run->exit_reason = 0x42; /* GVM porting add */
+	}
+
 	if (ret < 0) {
 		vcpu_set_reg(vcpu, 0, ~0UL);
 		return 1;
@@ -230,6 +235,9 @@ static int handle_trap_exceptions(struct kvm_vcpu *vcpu)
 		handled = exit_handler(vcpu);
 	}
 
+	//kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d will return=%d (>1 to guest, <0 on error, 0 to userspace)\n", __func__, vcpu->vcpu_idx, vcpu->vcpu_id, handled);
+
+
 	return handled;
 }
 
@@ -259,6 +267,7 @@ int handle_exit(struct kvm_vcpu *vcpu, int exception_index)
 	}
 
 	exception_index = ARM_EXCEPTION_CODE(exception_index);
+	//kvm_info("%s: vcpu_idx=%d vcpu_id=%d exception_index=%d\n", __func__, vcpu->vcpu_idx, vcpu->vcpu_id, exception_index);
 
 	switch (exception_index) {
 	case ARM_EXCEPTION_IRQ:

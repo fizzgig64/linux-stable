@@ -1012,6 +1012,11 @@ static int kvm_dsm_init(struct kvm *kvm, struct kvm_dsm_params *params)
 		goto out;
 	}
 	kvm->arch.dsm_thread = thread;
+
+	/* GVM add begin */
+	ret = kvm_dsm_alloc(kvm);
+	/* GVM add end */
+
 	return ret;
 
 out:
@@ -1028,6 +1033,8 @@ out_free_cluster_iplist:
 
 int kvm_dsm_alloc(struct kvm *kvm)
 {
+	dsm_info("called\n");
+
 	mutex_init(&kvm->arch.dsm_lock);
 	/* TODO: number of nodes is not set in this moment. */
 	kvm->arch.dsm_hvaslots = kvzalloc(sizeof(struct kvm_dsm_memslots), GFP_KERNEL_ACCOUNT);
@@ -1056,38 +1063,48 @@ void kvm_dsm_free(struct kvm *kvm)
 {
 	int ret, i;
 	struct kvm_dsm_memslots *slots;
+	struct task_struct *dsm_thread;
 
-	if (kvm->arch.dsm_enabled && kvm->arch.dsm_thread != NULL) {
-		dsm_info("node-%d stopping dsm server\n", kvm->arch.dsm_id);
-		kvm->arch.dsm_stopped = true;
-		smp_mb();
-#ifdef TARDIS_KVM_DSM
-		send_sig(SIGKILL, kvm->arch.expiration_timer_thread, 1);
-		ret = kthread_stop(kvm->arch.expiration_timer_thread);
-		if (ret < 0) {
-			printk(KERN_ERR "%s: node-%d dsm expiration timer exited with %d\n",
-					__func__, kvm->arch.dsm_id, ret);
-		}
-#endif
-		send_sig(SIGKILL, kvm->arch.dsm_thread, 1);
-		dsm_info("node-%d stopped dsm server line %d\n", kvm->arch.dsm_id, __LINE__);
-		ret = kthread_stop(kvm->arch.dsm_thread);
-		dsm_info("node-%d stopped dsm server line %d\n", kvm->arch.dsm_id, __LINE__);
-		if (ret < 0) {
-			dsm_err("node-%d dsm root server exited with %d\n", kvm->arch.dsm_id, ret);
-		}
-#ifdef TARDIS_KVM_DSM
-		cleanup_srcu_struct(&kvm->arch.expiration_list_srcu);
-#endif
-		for (i = 0; i < kvm->arch.cluster_iplist_len; i ++)
-			kfree(kvm->arch.cluster_iplist[i]);
-		kfree(kvm->arch.cluster_iplist);
-		dsm_info("node-%d stopped dsm server\n", kvm->arch.dsm_id);
+	if (!kvm->arch.dsm_enabled || kvm->arch.dsm_thread == NULL) {
+		return;
 	}
 
+	dsm_info("node-%d stopping dsm server\n", kvm->arch.dsm_id);
+	kvm->arch.dsm_stopped = true;
+	smp_mb();
+
+#ifdef TARDIS_KVM_DSM
+	send_sig(SIGKILL, kvm->arch.expiration_timer_thread, 1);
+	ret = kthread_stop(kvm->arch.expiration_timer_thread);
+	if (ret < 0) {
+		printk(KERN_ERR "%s: node-%d dsm expiration timer exited with %d\n",
+				__func__, kvm->arch.dsm_id, ret);
+	}
+#endif
+
+	dsm_thread = kvm->arch.dsm_thread;
+	kvm->arch.dsm_thread = NULL;
+
+	send_sig(SIGKILL, dsm_thread, 1);
+	//dsm_info("node-%d stopped dsm server line %d\n", kvm->arch.dsm_id, __LINE__);
+	ret = kthread_stop(dsm_thread);
+	//dsm_info("node-%d stopped dsm server line %d\n", kvm->arch.dsm_id, __LINE__);
+	if (ret < 0) {
+		dsm_err("node-%d dsm error root server exited with %d\n", kvm->arch.dsm_id, ret);
+	}
+
+#ifdef TARDIS_KVM_DSM
+	cleanup_srcu_struct(&kvm->arch.expiration_list_srcu);
+#endif
+	for (i = 0; i < kvm->arch.cluster_iplist_len; i ++)
+		kfree(kvm->arch.cluster_iplist[i]);
+	kfree(kvm->arch.cluster_iplist);
+	dsm_info("node-%d stopped dsm server\n", kvm->arch.dsm_id);
+
 	slots = kvm->arch.dsm_hvaslots;
-	if (!slots)
+	if (!slots) {
 		return;
+	}
 
 	for (i = 0; i < KVM_MEM_SLOTS_NUM; i++) {
 #ifdef KVM_DSM_DIFF
@@ -1114,6 +1131,9 @@ static int kvm_dsm_page_fault(struct kvm *kvm, struct kvm_memory_slot *memslot,
 		gfn_t gfn, bool is_smm, int write)
 {
 	int ret;
+
+	// dsm_info("gfn=0x%llX write=%d\n", gfn, write); Disabled while debugging IRQs.
+
 #ifdef KVM_DSM_PF_PROFILE
 	struct timespec ts;
 	ulong start;
@@ -1291,6 +1311,42 @@ out:
 	return ret;
 }
 
+int kvm_dsm_psci(struct kvm *kvm, struct kvm_dsm_psci *psci) {
+	// Get CPU, then mimic what PSCI does.
+	struct kvm_vcpu *vcpu = NULL;
+	struct vcpu_reset_state *reset_state;
+
+	vcpu = kvm_mpidr_to_vcpu(kvm, psci->cpu_id);
+	if (!vcpu) {
+		return -2; /* PSCI_RET_INVALID_PARAMS */
+	}
+
+	/* Only handle PSCI on for now */
+	if (!vcpu->arch.power_off) {
+		return -2;
+	}
+
+	reset_state = &vcpu->arch.reset_state;
+	reset_state->pc = psci->pc;
+	reset_state->r0 = psci->r0;
+
+	kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d pc=0x%llX\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id, psci->pc);
+
+	WRITE_ONCE(reset_state->reset, true);
+	kvm_make_request(KVM_REQ_VCPU_RESET, vcpu);
+
+	/*
+	 * Make sure the reset request is observed if the change to
+	 * power_state is observed.
+	 */
+	smp_wmb();
+
+	vcpu->arch.power_off = false;
+	kvm_vcpu_wake_up(vcpu);
+
+	return 0; /* PSCI_RET_SUCCESS */
+}
+
 long kvm_vm_ioctl_dsm(struct kvm *kvm, unsigned ioctl,
 				  unsigned long arg)
 {
@@ -1299,6 +1355,8 @@ long kvm_vm_ioctl_dsm(struct kvm *kvm, unsigned ioctl,
 
 	switch (ioctl) {
 	case KVM_DSM_ENABLE: {
+		//dsm_info("KVM_DSM_ENABLE 0x%lX\n", arg);
+
 		struct kvm_dsm_params params;
 		r = -EFAULT;
 		if (copy_from_user(&params, argp, sizeof(params)))
@@ -1318,6 +1376,8 @@ long kvm_vm_ioctl_dsm(struct kvm *kvm, unsigned ioctl,
 		break;
 	}
 	case KVM_DSM_MEMCPY: {
+		//dsm_info("KVM_DSM_MEMCPY 0x%lX\n", arg);
+
 		struct kvm_dsm_memcpy cpy;
 		r = -EFAULT;
 		if (copy_from_user(&cpy, argp, sizeof(cpy)))
@@ -1329,12 +1389,28 @@ long kvm_vm_ioctl_dsm(struct kvm *kvm, unsigned ioctl,
 		break;
 	}
 	case KVM_DSM_MEMPIN: {
+		//dsm_info("KVM_DSM_MEMPIN 0x%lX\n", arg);
+
 		struct kvm_dsm_mempin pin;
 		r = -EFAULT;
 		if (copy_from_user(&pin, argp, sizeof(pin)))
 			goto out;
 		r = kvm_dsm_mempin(kvm, pin.host_virt_addr, pin.length, pin.write,
 				pin.unpin);
+		if (r)
+			goto out;
+		break;
+	}
+	case KVM_DSM_PSCI: {
+		//dsm_info("KVM_DSM_PSCI 0x%lX\n", arg);
+
+		//struct kvm_dsm_mempin pin;
+		//struct kvm_dsm_psci { unsigned long cpu_id; unsigned long pc; unsigned long r0; };
+		struct kvm_dsm_psci psci;
+		r = -ENOTTY;
+		if (copy_from_user(&psci, argp, sizeof(psci)))
+			goto out;
+		r = kvm_dsm_psci(kvm, &psci);
 		if (r)
 			goto out;
 		break;

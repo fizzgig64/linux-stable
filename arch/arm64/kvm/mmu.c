@@ -1973,10 +1973,12 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 	// TODO, does this access need to flow or modify write/read/exec?
 	// Seems like ivy_kvm_dsm_page_fault only returns what was given in write.
 	// Maybe try passing write_fault then setting writable based on the response ACC_WRITE?
-	dsm_access = kvm_dsm_vcpu_acquire_page(vcpu, &slot, gfn, writable);
-	if (dsm_access < 0) {
-		kvm_release_pfn_clean(pfn);
-		return dsm_access;
+	if (kvm->arch.dsm_enabled) {
+		dsm_access = kvm_dsm_vcpu_acquire_page(vcpu, &slot, gfn, writable);
+		if (dsm_access < 0) {
+			kvm_release_pfn_clean(pfn);
+			return dsm_access;
+		}
 	}
 /* GVM add end */
 
@@ -2062,7 +2064,9 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 out_unlock:
 	spin_unlock(&kvm->mmu_lock);
 	kvm_set_pfn_accessed(pfn);
-	kvm_dsm_vcpu_release_page(vcpu, slot, gfn); /* GVM add */
+	if (kvm->arch.dsm_enabled) { // TODO move check into function.
+		kvm_dsm_vcpu_release_page(vcpu, slot, gfn); /* GVM add */
+	}
 	kvm_release_pfn_clean(pfn);
 	return ret;
 }
@@ -2588,20 +2592,29 @@ int kvm_arch_prepare_memory_region(struct kvm *kvm,
 	//ret = kvm_alloc_memslot_metadata(memslot, npages);
 	//if (ret)
 	//	goto out;
+	dsm_info("ret=%d\n", ret);
 
-	/* GVM add begin */
+	// does dsm_info break it?
 	//dsm_info("calling kvm_dsm_register_memslot_hva base_gfn=0x%llX npages=%lu userspace_addr=0x%lX\n", memslot->base_gfn, memslot->npages, memslot->userspace_addr);
-	ret = kvm_dsm_register_memslot_hva(kvm, memslot, npages);
-	if (ret) {
-		// kvm_arch_free_memslot(memslot); /* GVM arm64 porting, was track_free_memslot? */
-		goto out;
-	}
-	//dsm_info("calling kvm_dsm_add_memslot base_gfn=0x%llX npages=%lu userspace_addr=0x%lX\n", memslot->base_gfn, memslot->npages, memslot->userspace_addr);
-	ret = kvm_dsm_add_memslot(kvm, memslot, mem->slot >> 16);
-	if (ret) {
-		goto out;
+	if (kvm->arch.dsm_enabled) { // TODO move check into function.
+		/* GVM add begin */
+		ret = kvm_dsm_register_memslot_hva(kvm, memslot, npages);
+		if (ret) {
+			dsm_info("kvm_dsm_register_memslot_hva failed %d\n", ret);
+			// kvm_arch_free_memslot(memslot); /* GVM arm64 porting, was track_free_memslot? */
+			goto out;
+		}
 	}
 
+	// does dsm_info break it?
+	//dsm_info("calling kvm_dsm_add_memslot base_gfn=0x%llX npages=%lu userspace_addr=0x%lX\n", memslot->base_gfn, memslot->npages, memslot->userspace_addr);
+	if (kvm->arch.dsm_enabled) { // TODO move check into function.
+		ret = kvm_dsm_add_memslot(kvm, memslot, mem->slot >> 16);
+		if (ret) {
+			dsm_info("kvm_dsm_add_memslot failed %d\n", ret);
+			goto out;
+		}
+	}
 	/* GVM add end */
 
 	spin_lock(&kvm->mmu_lock);
@@ -2634,7 +2647,9 @@ void kvm_arch_flush_shadow_memslot(struct kvm *kvm,
 	gpa_t gpa = slot->base_gfn << PAGE_SHIFT;
 	phys_addr_t size = slot->npages << PAGE_SHIFT;
 
-	kvm_dsm_remove_memslot(kvm, slot); /* GVM add */
+	if (kvm->arch.dsm_enabled) { // TODO move check into function.
+		kvm_dsm_remove_memslot(kvm, slot); /* GVM add */
+	}
 
 	spin_lock(&kvm->mmu_lock);
 	unmap_stage2_range(&kvm->arch.mmu, gpa, size);

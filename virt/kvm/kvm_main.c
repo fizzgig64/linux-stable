@@ -400,6 +400,8 @@ static void kvm_vcpu_init(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned id)
 	/* GVM add begin */
 	char from_comm[TASK_COMM_LEN];
 
+	kvm_info("%s: vcpu=%p called id=%u\n", __func__, vcpu, id);
+
 	/*
 	 * task_set_comm is not defined? This code snippet is equivalent to
 	 * set_task_comm but tracing functions.
@@ -431,6 +433,8 @@ static void kvm_vcpu_init(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned id)
 void kvm_vcpu_destroy(struct kvm_vcpu *vcpu)
 {
 	kvm_arch_vcpu_destroy(vcpu);
+
+	kvm_info("%s: vcpu=%p called", __func__, vcpu);
 
 	/*
 	 * No need for rcu_read_lock as VCPU_RUN is the only place that changes
@@ -641,6 +645,8 @@ static struct kvm_memslots *kvm_alloc_memslots(void)
 	int i;
 	struct kvm_memslots *slots;
 
+	//kvm_info("%s: called", __func__);
+
 	slots = kvzalloc(sizeof(struct kvm_memslots), GFP_KERNEL_ACCOUNT);
 	if (!slots)
 		return NULL;
@@ -758,6 +764,8 @@ static struct kvm *kvm_create_vm(unsigned long type)
 	if (!kvm)
 		return ERR_PTR(-ENOMEM);
 
+	kvm_info("%s: called type=%lu\n", __func__, type);
+
 	spin_lock_init(&kvm->mmu_lock);
 	mmgrab(current->mm);
 	kvm->mm = current->mm;
@@ -865,6 +873,8 @@ static void kvm_destroy_vm(struct kvm *kvm)
 {
 	int i;
 	struct mm_struct *mm = kvm->mm;
+
+	kvm_info("%s: called\n", __func__);
 
 	kvm_uevent_notify_change(KVM_EVENT_DESTROY_VM, kvm);
 	kvm_destroy_vm_debugfs(kvm);
@@ -1286,9 +1296,13 @@ int __kvm_set_memory_region(struct kvm *kvm,
 	int as_id, id;
 	int r;
 
+	//kvm_info("%s: vcpu=%p called\n", __func__);
+
 	r = check_memory_region_flags(mem);
-	if (r)
+	if (r) {
+		//kvm_info("%s: check_memory_region_flags failed %d\n", __func__, r);
 		return r;
+	}
 
 	as_id = mem->slot >> 16;
 	id = (u16)mem->slot;
@@ -1308,6 +1322,8 @@ int __kvm_set_memory_region(struct kvm *kvm,
 	if (mem->guest_phys_addr + mem->memory_size < mem->guest_phys_addr)
 		return -EINVAL;
 
+	//kvm_info("%s: passed serious of EINTVAL\n", __func__);
+
 	/*
 	 * Make a full copy of the old memslot, the pointer will become stale
 	 * when the memslots are re-sorted by update_memslots(), and the old
@@ -1323,8 +1339,10 @@ int __kvm_set_memory_region(struct kvm *kvm,
 		old.id = id;
 	}
 
-	if (!mem->memory_size)
+	if (!mem->memory_size) {
+		//kvm_info("%s: invalid memory size\n", __func__);
 		return kvm_delete_memslot(kvm, mem, &old, as_id);
+	}
 
 	new.id = id;
 	new.base_gfn = mem->guest_phys_addr >> PAGE_SHIFT;
@@ -1332,8 +1350,10 @@ int __kvm_set_memory_region(struct kvm *kvm,
 	new.flags = mem->flags;
 	new.userspace_addr = mem->userspace_addr;
 
-	if (new.npages > KVM_MEM_MAX_NR_PAGES)
+	if (new.npages > KVM_MEM_MAX_NR_PAGES) {
+		//kvm_info("%s: too many pages\n", __func__);
 		return -EINVAL;
+	}
 
 	if (!old.npages) {
 		change = KVM_MR_CREATE;
@@ -1357,6 +1377,8 @@ int __kvm_set_memory_region(struct kvm *kvm,
 		memcpy(&new.arch, &old.arch, sizeof(new.arch));
 	}
 
+	//kvm_info("%s: passed memsets\n", __func__);
+
 	if ((change == KVM_MR_CREATE) || (change == KVM_MR_MOVE)) {
 		/* Check for overlaps */
 		kvm_for_each_memslot(tmp, __kvm_memslots(kvm, as_id)) {
@@ -1367,6 +1389,8 @@ int __kvm_set_memory_region(struct kvm *kvm,
 				return -EEXIST;
 		}
 	}
+
+	//kvm_info("%s: passed overlap checks\n", __func__);
 
 	/* Allocate/free page dirty bitmap as needed */
 	if (!(new.flags & KVM_MEM_LOG_DIRTY_PAGES))
@@ -1380,9 +1404,13 @@ int __kvm_set_memory_region(struct kvm *kvm,
 			bitmap_set(new.dirty_bitmap, 0, new.npages);
 	}
 
+	//kvm_info("%s: passed dirty bitmap checks\n", __func__);
+
 	r = kvm_set_memslot(kvm, mem, &old, &new, as_id, change);
-	if (r)
+	if (r) {
+		kvm_info("%s: kvm_set_memslot failed %d\n", __func__, r);
 		goto out_bitmap;
+	}
 
 	if (old.dirty_bitmap && !new.dirty_bitmap)
 		kvm_destroy_dirty_bitmap(&old);
@@ -1402,6 +1430,7 @@ int kvm_set_memory_region(struct kvm *kvm,
 
 	mutex_lock(&kvm->slots_lock);
 	r = __kvm_set_memory_region(kvm, mem);
+	//kvm_info("%s: called %d\n", __func__, r);
 	mutex_unlock(&kvm->slots_lock);
 	return r;
 }
@@ -2849,6 +2878,8 @@ bool kvm_vcpu_wake_up(struct kvm_vcpu *vcpu)
 {
 	struct rcuwait *waitp;
 
+	//kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id);
+
 	waitp = kvm_arch_vcpu_get_wait(vcpu);
 	if (rcuwait_wake_up(waitp)) {
 		WRITE_ONCE(vcpu->ready, true);
@@ -2868,6 +2899,8 @@ void kvm_vcpu_kick(struct kvm_vcpu *vcpu)
 {
 	int me;
 	int cpu = vcpu->cpu;
+
+	//kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id);
 
 	if (kvm_vcpu_wake_up(vcpu))
 		return;
@@ -3869,6 +3902,9 @@ static long kvm_vm_ioctl(struct file *filp,
 		r = kvm_arch_vm_ioctl(filp, ioctl, arg);
 	}
 out:
+
+	//kvm_info("%s: ioctl=0x%X arg=0x%lX r=%d\n", __func__, ioctl, arg, r);
+
 	return r;
 }
 

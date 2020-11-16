@@ -15,12 +15,24 @@ int kvm_hvc_call_handler(struct kvm_vcpu *vcpu)
 	long val = SMCCC_RET_NOT_SUPPORTED;
 	u32 feature;
 	gpa_t gpa;
+	int i; /* GVM porting add */
+
+	kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d func_id=%u\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id, func_id);
+
+	/* Will return to userspace */
+	/* See https://patchwork.kernel.org/project/linux-arm-kernel/patch/20170808164616.25949-12-james.morse@arm.com/ */
+	for (i = 0; i < ARRAY_SIZE(vcpu->run->hypercall.args); i++) {
+		vcpu->run->hypercall.args[i] = vcpu_get_reg(vcpu, i);
+	}
+	vcpu->run->hypercall.longmode = *vcpu_cpsr(vcpu);
 
 	switch (func_id) {
 	case ARM_SMCCC_VERSION_FUNC_ID:
+	kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d func_id=%u version\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id, func_id);
 		val = ARM_SMCCC_VERSION_1_1;
 		break;
 	case ARM_SMCCC_ARCH_FEATURES_FUNC_ID:
+	kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d func_id=%u arch_features\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id, func_id);
 		feature = smccc_get_arg1(vcpu);
 		switch (feature) {
 		case ARM_SMCCC_ARCH_WORKAROUND_1:
@@ -55,9 +67,13 @@ int kvm_hvc_call_handler(struct kvm_vcpu *vcpu)
 		}
 		break;
 	case ARM_SMCCC_HV_PV_TIME_FEATURES:
+	kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d func_id=%u hypercall_pv_features\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id, func_id);
+
 		val = kvm_hypercall_pv_features(vcpu);
 		break;
 	case ARM_SMCCC_HV_PV_TIME_ST:
+	kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d func_id=%u init_stolen_time\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id, func_id);
+
 		gpa = kvm_init_stolen_time(vcpu);
 		if (gpa != GPA_INVALID)
 			val = gpa;

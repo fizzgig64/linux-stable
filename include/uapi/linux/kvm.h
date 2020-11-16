@@ -1414,6 +1414,15 @@ struct kvm_dsm_mempin {
 };
 #define KVM_DSM_MEMPIN            _IOW(KVMIO,  0xf2, struct kvm_dsm_mempin)
 
+/* DSM ARM PSCI call */
+struct kvm_dsm_psci {
+	/* missing: arg0, the PSCI function selection, on, off, affinity, etc */
+	__u64 cpu_id; /* arg1 Perhaps superfluious */
+	__u64 pc; /* arg2 */
+	__u64 r0; /* arg3 */
+};
+#define KVM_DSM_PSCI            _IOW(KVMIO,  0xf3, struct kvm_dsm_psci)
+
 #define KVM_DSM_PGSIZE            (4 * 1024)
 /* GVM add end */
 

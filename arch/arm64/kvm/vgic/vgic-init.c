@@ -73,6 +73,9 @@ int kvm_vgic_create(struct kvm *kvm, u32 type)
 	int i, ret;
 	struct kvm_vcpu *vcpu;
 
+	kvm_info("%s: type=%u irqchip_in_kernel=%d\n", __func__, type,
+		(irqchip_in_kernel(kvm)) ? 1 : 0);
+
 	if (irqchip_in_kernel(kvm))
 		return -EEXIST;
 
@@ -294,8 +297,10 @@ int vgic_init(struct kvm *kvm)
 		}
 	}
 
-	if (vgic_has_its(kvm))
+	if (vgic_has_its(kvm)) {
+		kvm_info("%s: vgic_has_its=true\n", __func__);
 		vgic_lpi_translation_cache_init(kvm);
+	}
 
 	/*
 	 * If we have GICv4.1 enabled, unconditionnaly request enable the
@@ -303,6 +308,7 @@ int vgic_init(struct kvm *kvm)
 	 * enable it if we present a virtual ITS to the guest.
 	 */
 	if (vgic_supports_direct_msis(kvm)) {
+		kvm_info("%s: vgic_supports_direct_msis=true\n", __func__);
 		ret = vgic_v4_init(kvm);
 		if (ret)
 			goto out;

@@ -98,6 +98,8 @@ static unsigned long kvm_psci_vcpu_on(struct kvm_vcpu *source_vcpu)
 	 */
 	reset_state->r0 = smccc_get_arg3(source_vcpu);
 
+kvm_info("%s: cpu_id=%lu pc=0x%lX r0=0x%lX\n", __func__, cpu_id, reset_state->pc, reset_state->r0);
+
 	WRITE_ONCE(reset_state->reset, true);
 	kvm_make_request(KVM_REQ_VCPU_RESET, vcpu);
 
@@ -234,9 +236,11 @@ static int kvm_psci_0_2_call(struct kvm_vcpu *vcpu)
 		break;
 	case PSCI_0_2_FN_CPU_SUSPEND:
 	case PSCI_0_2_FN64_CPU_SUSPEND:
+	kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d psci suspend\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id);
 		val = kvm_psci_vcpu_suspend(vcpu);
 		break;
 	case PSCI_0_2_FN_CPU_OFF:
+	kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d psci vcpu off\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id);
 		kvm_psci_vcpu_off(vcpu);
 		val = PSCI_RET_SUCCESS;
 		break;
@@ -245,7 +249,10 @@ static int kvm_psci_0_2_call(struct kvm_vcpu *vcpu)
 		fallthrough;
 	case PSCI_0_2_FN64_CPU_ON:
 		mutex_lock(&kvm->lock);
+	kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d psci on\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id);
 		val = kvm_psci_vcpu_on(vcpu);
+		/* Add this to request KVM return to userspace */
+		ret = 0; /* GVM porting add */
 		mutex_unlock(&kvm->lock);
 		break;
 	case PSCI_0_2_FN_AFFINITY_INFO:
@@ -263,6 +270,7 @@ static int kvm_psci_0_2_call(struct kvm_vcpu *vcpu)
 		val = PSCI_0_2_TOS_MP;
 		break;
 	case PSCI_0_2_FN_SYSTEM_OFF:
+	kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d psci system off\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id);
 		kvm_psci_system_off(vcpu);
 		/*
 		 * We shouldn't be going back to guest VCPU after
@@ -278,6 +286,7 @@ static int kvm_psci_0_2_call(struct kvm_vcpu *vcpu)
 		ret = 0;
 		break;
 	case PSCI_0_2_FN_SYSTEM_RESET:
+	kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d psci system reset\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id);
 		kvm_psci_system_reset(vcpu);
 		/*
 		 * Same reason as SYSTEM_OFF for preloading r0 (or x0)
@@ -383,6 +392,8 @@ static int kvm_psci_0_1_call(struct kvm_vcpu *vcpu)
  */
 int kvm_psci_call(struct kvm_vcpu *vcpu)
 {
+	kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id);
+
 	switch (kvm_psci_version(vcpu, vcpu->kvm)) {
 	case KVM_ARM_PSCI_1_0:
 		return kvm_psci_1_0_call(vcpu);
