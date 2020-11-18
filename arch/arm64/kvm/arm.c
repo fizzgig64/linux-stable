@@ -384,7 +384,7 @@ void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
 
 static void vcpu_power_off(struct kvm_vcpu *vcpu)
 {
-	kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d will request KVM_REQ_SLEEP and set power_off=true\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id);
+	//kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d will request KVM_REQ_SLEEP and set power_off=true\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id);
 
 	vcpu->arch.power_off = true;
 	kvm_make_request(KVM_REQ_SLEEP, vcpu);
@@ -410,14 +410,14 @@ int kvm_arch_vcpu_ioctl_set_mpstate(struct kvm_vcpu *vcpu,
 	switch (mp_state->mp_state) {
 	case KVM_MP_STATE_RUNNABLE: {
 // KVM_INFO here
-	kvm_info("%s: vcpu_idx=%d vcpu_id=%d setting power_off=false\n", __func__, vcpu->vcpu_idx, vcpu->vcpu_id);
+	//kvm_info("%s: vcpu_idx=%d vcpu_id=%d setting power_off=false\n", __func__, vcpu->vcpu_idx, vcpu->vcpu_id);
 
 		vcpu->arch.power_off = false;
 		break;
 	}
 	case KVM_MP_STATE_STOPPED: {
 // KVM_INFO here
-	kvm_info("%s: vcpu_idx=%d vcpu_id=%d calling vcpu_power_off\n", __func__, vcpu->vcpu_idx, vcpu->vcpu_id);
+	//kvm_info("%s: vcpu_idx=%d vcpu_id=%d calling vcpu_power_off\n", __func__, vcpu->vcpu_idx, vcpu->vcpu_id);
 
 		vcpu_power_off(vcpu);
 		break;
@@ -1049,7 +1049,7 @@ static int kvm_arch_vcpu_ioctl_vcpu_init(struct kvm_vcpu *vcpu,
 	 */
 	if (test_bit(KVM_ARM_VCPU_POWER_OFF, vcpu->arch.features)) {
 // KVM_INFO here
-	kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d handling start-in-power-off case\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id);
+	//kvm_info("%s: vcpu=%p vcpu_idx=%d vcpu_id=%d handling start-in-power-off case\n", __func__, vcpu, vcpu->vcpu_idx, vcpu->vcpu_id);
 
 		vcpu_power_off(vcpu);
 	} else {

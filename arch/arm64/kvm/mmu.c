@@ -2592,7 +2592,7 @@ int kvm_arch_prepare_memory_region(struct kvm *kvm,
 	//ret = kvm_alloc_memslot_metadata(memslot, npages);
 	//if (ret)
 	//	goto out;
-	dsm_info("ret=%d\n", ret);
+	//dsm_info("ret=%d\n", ret);
 
 	// does dsm_info break it?
 	//dsm_info("calling kvm_dsm_register_memslot_hva base_gfn=0x%llX npages=%lu userspace_addr=0x%lX\n", memslot->base_gfn, memslot->npages, memslot->userspace_addr);

@@ -18,6 +18,8 @@
 #define GFN_PRESENT_MASK    (1ULL << 63)
 #define GFN_SMM_MASK        (1ULL << 62)
 
+#define KVM_DSM_DEBUG
+
 #ifdef KVM_DSM_DEBUG
 extern bool kvm_dsm_dbg_verbose;
 #define dsm_debug(fmt, ...) printk("kvm-dsm [%i]: %s: " fmt,		\
