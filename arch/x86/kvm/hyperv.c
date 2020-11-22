@@ -23,6 +23,7 @@
 #include "ioapic.h"
 #include "cpuid.h"
 #include "hyperv.h"
+#include "dsm.h" /* GVM add */
 
 #include <linux/cpu.h>
 #include <linux/kvm_host.h>
@@ -205,6 +206,7 @@ static int synic_set_msr(struct kvm_vcpu_hv_synic *synic,
 			 u32 msr, u64 data, bool host)
 {
 	struct kvm_vcpu *vcpu = synic_to_vcpu(synic);
+	struct kvm_memory_slot *slot; /* GVM add */
 	int ret;
 
 	if (!synic->active && !host)
@@ -227,25 +229,45 @@ static int synic_set_msr(struct kvm_vcpu_hv_synic *synic,
 		synic->version = data;
 		break;
 	case HV_X64_MSR_SIEFP:
+		/* GVM add begin: previously did not include a scope */
 		if ((data & HV_SYNIC_SIEFP_ENABLE) && !host &&
-		    !synic->dont_zero_synic_pages)
-			if (kvm_clear_guest(vcpu->kvm,
-					    data & PAGE_MASK, PAGE_SIZE)) {
+		    !synic->dont_zero_synic_pages) {
+			if (kvm_dsm_vcpu_acquire_page(vcpu, &slot, data >> PAGE_SHIFT,
+						true) < 0) {
 				ret = 1;
 				break;
 			}
+		/* GVM add end */
+			if (kvm_clear_guest(vcpu->kvm,
+					    data & PAGE_MASK, PAGE_SIZE)) {
+				ret = 1;
+				kvm_dsm_vcpu_release_page(vcpu, slot, data >> PAGE_SHIFT); /* GVM add */
+				break;
+			}
+			kvm_dsm_vcpu_release_page(vcpu, slot, data >> PAGE_SHIFT); /* GVM add */
+		} /* GVM add */
 		synic->evt_page = data;
 		if (!host)
 			synic_exit(synic, msr);
 		break;
 	case HV_X64_MSR_SIMP:
+		/* GVM add begin: previously did not include a scope */
 		if ((data & HV_SYNIC_SIMP_ENABLE) && !host &&
-		    !synic->dont_zero_synic_pages)
+		    !synic->dont_zero_synic_pages) {
+			if (kvm_dsm_vcpu_acquire_page(vcpu, &slot, data >> PAGE_SHIFT,
+						true) < 0) {
+				ret = 1;
+				break;
+			}
+			/* GVM add end */
 			if (kvm_clear_guest(vcpu->kvm,
 					    data & PAGE_MASK, PAGE_SIZE)) {
 				ret = 1;
 				break;
+				kvm_dsm_vcpu_release_page(vcpu, slot, data >> PAGE_SHIFT); /* GVM add (bug?) */
 			}
+			kvm_dsm_vcpu_release_page(vcpu, slot, data >> PAGE_SHIFT); /* GVM add */
+		} /* GVM add */
 		synic->msg_page = data;
 		if (!host)
 			synic_exit(synic, msr);
@@ -1058,6 +1080,7 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 			   struct pvclock_vcpu_time_info *hv_clock)
 {
 	struct kvm_hv *hv = &kvm->arch.hyperv;
+	struct kvm_memslots *slots; /* GVM add */
 	u32 tsc_seq;
 	u64 gfn;
 
@@ -1072,13 +1095,18 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 		goto out_unlock;
 
 	gfn = hv->hv_tsc_page >> HV_X64_MSR_TSC_REFERENCE_ADDRESS_SHIFT;
+	/* GVM add begin */
+	if (kvm_dsm_acquire(kvm, &slots, gfn_to_gpa(gfn),
+				sizeof(hv->tsc_ref), true) < 0)
+		goto out_unlock;
+	/* GVM add end */
 	/*
 	 * Because the TSC parameters only vary when there is a
 	 * change in the master clock, do not bother with caching.
 	 */
 	if (unlikely(kvm_read_guest(kvm, gfn_to_gpa(gfn),
 				    &tsc_seq, sizeof(tsc_seq))))
-		goto out_unlock;
+		goto out; /* GVM add: was return */
 
 	/*
 	 * While we're computing and writing the parameters, force the
@@ -1087,15 +1115,15 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 	hv->tsc_ref.tsc_sequence = 0;
 	if (kvm_write_guest(kvm, gfn_to_gpa(gfn),
 			    &hv->tsc_ref, sizeof(hv->tsc_ref.tsc_sequence)))
-		goto out_unlock;
+		goto out; /* GVM add was return */
 
 	if (!compute_tsc_page_parameters(hv_clock, &hv->tsc_ref))
-		goto out_unlock;
+		goto out; /* GVM add was return */
 
 	/* Ensure sequence is zero before writing the rest of the struct.  */
 	smp_wmb();
 	if (kvm_write_guest(kvm, gfn_to_gpa(gfn), &hv->tsc_ref, sizeof(hv->tsc_ref)))
-		goto out_unlock;
+		goto out; /* GVM add was return */
 
 	/*
 	 * Now switch to the TSC page mechanism by writing the sequence.
@@ -1110,6 +1138,11 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 	hv->tsc_ref.tsc_sequence = tsc_seq;
 	kvm_write_guest(kvm, gfn_to_gpa(gfn),
 			&hv->tsc_ref, sizeof(hv->tsc_ref.tsc_sequence));
+	/* GVM add begin */
+out:
+	kvm_dsm_release(kvm, slots, gfn_to_gpa(gfn), sizeof(hv->tsc_ref));
+	/* GVM add end */
+
 out_unlock:
 	mutex_unlock(&kvm->arch.hyperv.hv_lock);
 }

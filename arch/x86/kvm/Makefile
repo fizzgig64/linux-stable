@@ -17,6 +17,13 @@ kvm-y			+= x86.o emulate.o i8259.o irq.o lapic.o \
 			   i8254.o ioapic.o irq_comm.o cpuid.o pmu.o mtrr.o \
 			   hyperv.o debugfs.o mmu/mmu.o mmu/page_track.o
 
+# GVM add begin
+kvm-$(CONFIG_KVM_DSM)			+= dsm.o xbzrle.o dsm-util.o ivy.o
+# TODO: Add CONFIG_KVM_DSM_RDMA / _TCP
+# kvm-$(CONFIG_KVM_DSM)			+= krdma.o
+kvm-$(CONFIG_KVM_DSM)                   += ktcp.o
+# GVM add end
+
 kvm-intel-y		+= vmx/vmx.o vmx/vmenter.o vmx/pmu_intel.o vmx/vmcs12.o vmx/evmcs.o vmx/nested.o
 kvm-amd-y		+= svm/svm.o svm/vmenter.o svm/pmu.o svm/nested.o svm/avic.o svm/sev.o
 
