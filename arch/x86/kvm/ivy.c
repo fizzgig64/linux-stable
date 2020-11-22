@@ -826,8 +826,8 @@ out:
 	return ret;
 
 out_error:
-	dump_stack();
-	printk(KERN_ERR "kvm-dsm: node-%d failed to handle page fault on gfn[%llu,%d], "
+	//dump_stack();
+	dsm_err("node-%d failed to handle page fault on gfn[%llu,%d], "
 			"error: %d\n", kvm->arch.dsm_id, gfn, is_smm, ret);
 	kfree(page);
 	return ret;

@@ -18,6 +18,7 @@
 #include "irq.h"
 #include "ioapic.h"
 #include "mmu.h"
+#include "dsm.h" /* GVM add */
 #include "mmu_internal.h"
 #include "x86.h"
 #include "kvm_cache_regs.h"
@@ -188,6 +189,14 @@ module_param(dbg, bool, 0644);
 #define PT64_EPT_EXECUTABLE_MASK		0x4ull
 
 #include <trace/events/kvm.h>
+
+/* GVM add begin */
+/*
+ * Bit 63 and 61 are used by EPT PTEs, and bit 62 is used to denote special
+ * SPTEs, currently MMIO SPTEs and Access Tracking SPTEs.
+ */
+#define SPTE_DSM_WRITEABLE (1ULL << 60)
+/* GVM add end */
 
 #define SPTE_HOST_WRITEABLE	(1ULL << PT_FIRST_AVAIL_BITS_SHIFT)
 #define SPTE_MMU_WRITEABLE	(1ULL << (PT_FIRST_AVAIL_BITS_SHIFT + 1))
@@ -798,8 +807,8 @@ retry:
 
 static bool spte_can_locklessly_be_made_writable(u64 spte)
 {
-	return (spte & (SPTE_HOST_WRITEABLE | SPTE_MMU_WRITEABLE)) ==
-		(SPTE_HOST_WRITEABLE | SPTE_MMU_WRITEABLE);
+	return (spte & (SPTE_HOST_WRITEABLE | SPTE_MMU_WRITEABLE | SPTE_DSM_WRITEABLE)) /* GVM add | SPTE_DSM_WRITEABLE */
+		== (SPTE_HOST_WRITEABLE | SPTE_MMU_WRITEABLE | SPTE_DSM_WRITEABLE); /* GVM add | SPTE_DSM_WRITEABLE */
 }
 
 static bool spte_has_volatile_bits(u64 spte)
@@ -1353,7 +1362,8 @@ static void pte_list_remove(struct kvm_rmap_head *rmap_head, u64 *sptep)
 	__pte_list_remove(sptep, rmap_head);
 }
 
-static struct kvm_rmap_head *__gfn_to_rmap(gfn_t gfn, int level,
+/* GVM porting add remove static */
+struct kvm_rmap_head *__gfn_to_rmap(gfn_t gfn, int level,
 					   struct kvm_memory_slot *slot)
 {
 	unsigned long idx;
@@ -1721,7 +1731,8 @@ static bool rmap_write_protect(struct kvm_vcpu *vcpu, u64 gfn)
 	return kvm_mmu_slot_gfn_write_protect(vcpu->kvm, slot, gfn);
 }
 
-static bool kvm_zap_rmapp(struct kvm *kvm, struct kvm_rmap_head *rmap_head)
+/* GVM porting remove static */
+bool kvm_zap_rmapp(struct kvm *kvm, struct kvm_rmap_head *rmap_head)
 {
 	u64 *sptep;
 	struct rmap_iterator iter;
@@ -3026,10 +3037,33 @@ static int set_spte(struct kvm_vcpu *vcpu, u64 *sptep,
 	if (!kvm_is_mmio_pfn(pfn))
 		spte |= shadow_me_mask;
 
+/* GVM add begin */
+/* GVM merge: added after new kvm_is_mmio_pfn */
+#ifdef CONFIG_KVM_DSM
+	/*
+	 * We set SPTE_DSM_WRITEABLE only when the page is in DSM_MODIFIED state,
+	 * so that pages that should be write protected according to DSM protocol
+	 * will not be erroneously "fixed" by fast_page_fault. When we are not in
+	 * DSM mode, all pages are always in DSM_MODIFIED state effectively.
+	 */
+	if (!vcpu->kvm->arch.dsm_enabled)
+		spte |= SPTE_DSM_WRITEABLE;
+#endif
+/* GVM add end */
+
 	spte |= (u64)pfn << PAGE_SHIFT;
 
 	if (pte_access & ACC_WRITE_MASK) {
-		spte |= PT_WRITABLE_MASK | SPTE_MMU_WRITEABLE;
+		/* GVM add begin */
+		/*
+		 * If we're in SPT mode and the Guest PTE is write protected,
+		 * SPTE_DSM_WRITEABLE will not be set even if the page is in
+		 * DSM_MODIFIED state. This is okay because SPTE_MMU_WRITEABLE
+		 * will also not be set in this case, and it already prevents
+		 * fast_page_fault.
+		 */
+		spte |= PT_WRITABLE_MASK | SPTE_MMU_WRITEABLE | SPTE_DSM_WRITEABLE;
+		/* GVM add end */
 
 		/*
 		 * Optimization: for pte sync, if spte was writable the hash
@@ -3053,6 +3087,15 @@ static int set_spte(struct kvm_vcpu *vcpu, u64 *sptep,
 		kvm_vcpu_mark_page_dirty(vcpu, gfn);
 		spte |= spte_shadow_dirty_mask(spte);
 	}
+
+/* GVM add begin */
+#ifdef CONFIG_KVM_DSM
+	if (vcpu->kvm->arch.dsm_enabled) {
+		dsm_debug_v("kvm[%d] level[%d] gfn[%llu,%d] dsm_access[%d]\n",
+				vcpu->kvm->arch.dsm_id, level, gfn, is_smm(vcpu), pte_access);
+	}
+#endif
+/* GVM add end */
 
 	if (speculative)
 		spte = mark_spte_for_access_track(spte);
@@ -3121,6 +3164,8 @@ static int mmu_set_spte(struct kvm_vcpu *vcpu, u64 *sptep,
 	if (is_shadow_present_pte(*sptep)) {
 		if (!was_rmapped) {
 			rmap_count = rmap_add(vcpu, sptep, gfn);
+			// This is noisy.
+			// dsm_info("%s: !was_rmapped and is_shadow_present_pte gfn=0x%llX pfn=0x%llX rmap_count=%d\n", __func__, gfn, pfn, rmap_count); /* GVM add */
 			if (rmap_count > RMAP_RECYCLE_THRESHOLD)
 				rmap_recycle(vcpu, sptep, gfn);
 		}
@@ -3195,6 +3240,20 @@ static void __direct_pte_prefetch(struct kvm_vcpu *vcpu,
 static void direct_pte_prefetch(struct kvm_vcpu *vcpu, u64 *sptep)
 {
 	struct kvm_mmu_page *sp;
+
+	/* GVM add begin */
+	/* In DSM mode, we must ensure the contents of
+	 * prefetched pages are up to date before building
+	 * their sptes. This may involve querying remote kvm
+	 * instances, and should not be done in spinlock
+	 * (mmu_lock) context, so we disable pte prefetch if
+	 * DSM is enabled.
+	 */
+#ifdef CONFIG_KVM_DSM
+	if (vcpu->kvm->arch.dsm_enabled)
+		return;
+#endif
+	/* GVM add end */
 
 	sp = sptep_to_sp(sptep);
 
@@ -3310,7 +3369,7 @@ static void disallowed_hugepage_adjust(struct kvm_shadow_walk_iterator it,
 
 static int __direct_map(struct kvm_vcpu *vcpu, gpa_t gpa, int write,
 			int map_writable, int max_level, kvm_pfn_t pfn,
-			bool prefault, bool account_disallowed_nx_lpage)
+			bool prefault, bool account_disallowed_nx_lpage, int dsm_access) /* GVM add dsm_access */
 {
 	struct kvm_shadow_walk_iterator it;
 	struct kvm_mmu_page *sp;
@@ -3346,7 +3405,7 @@ static int __direct_map(struct kvm_vcpu *vcpu, gpa_t gpa, int write,
 		}
 	}
 
-	ret = mmu_set_spte(vcpu, it.sptep, ACC_ALL,
+	ret = mmu_set_spte(vcpu, it.sptep, dsm_access,  /* GVM add ACC_ALL-> dsm_access */
 			   write, level, base_gfn, pfn, prefault,
 			   map_writable);
 	direct_pte_prefetch(vcpu, it.sptep);
@@ -3961,6 +4020,26 @@ walk_shadow_page_get_mmio_spte(struct kvm_vcpu *vcpu, u64 addr, u64 *sptep)
 	return reserved;
 }
 
+/* GVM add begin */
+/**
+bool kvm_mmu_is_mmio_gfn(struct kvm *kvm, struct kvm_memory_slot *memslot,
+		gfn_t gfn)
+{
+	struct kvm_rmap_head *rmap_head = __gfn_to_rmap(gfn, PG_LEVEL_4K,
+			memslot);
+	u64 *sptep;
+	struct rmap_iterator iter;
+
+	for_each_rmap_spte(rmap_head, &iter, sptep) {
+		if (is_mmio_spte(*sptep))
+			return true;
+	}
+	return false;
+}
+EXPORT_SYMBOL_GPL(kvm_mmu_is_mmio_gfn);
+**/
+/* GVM add end */
+
 static int handle_mmio_page_fault(struct kvm_vcpu *vcpu, u64 addr, bool direct)
 {
 	u64 spte;
@@ -4083,6 +4162,10 @@ static int direct_page_fault(struct kvm_vcpu *vcpu, gpa_t gpa, u32 error_code,
 	bool exec = error_code & PFERR_FETCH_MASK;
 	bool lpage_disallowed = exec && is_nx_huge_page_enabled();
 	bool map_writable;
+	struct kvm_memory_slot *slot; /* GVM add */
+	int dsm_access; /* GVM add */
+	// This is noisy.
+	//dsm_info("%s: gpa=0x%llX error_code=%u\n", __func__, gpa, error_code); /* GVM add */
 
 	gfn_t gfn = gpa >> PAGE_SHIFT;
 	unsigned long mmu_seq;
@@ -4102,6 +4185,14 @@ static int direct_page_fault(struct kvm_vcpu *vcpu, gpa_t gpa, u32 error_code,
 	if (lpage_disallowed)
 		max_level = PG_LEVEL_4K;
 
+/* GVM add begin */
+#ifdef CONFIG_KVM_DSM
+	/* Disable large pages for DSM */
+	if (vcpu->kvm->arch.dsm_enabled)
+		max_level = PG_LEVEL_4K;
+#endif
+/* GVM add end */
+
 	mmu_seq = vcpu->kvm->mmu_notifier_seq;
 	smp_rmb();
 
@@ -4111,6 +4202,23 @@ static int direct_page_fault(struct kvm_vcpu *vcpu, gpa_t gpa, u32 error_code,
 	if (handle_abnormal_pfn(vcpu, is_tdp ? 0 : gpa, gfn, pfn, ACC_ALL, &r))
 		return r;
 
+/* GVM add begin */
+#ifdef CONFIG_KVM_DSM
+	dsm_debug_v("kvm[%d]-cpu[%d] #pf[%llx,%x](%s) rip[%lx] gpa[%llu,%d] host_writable[%d]\n",
+			vcpu->kvm->arch.dsm_id, vcpu->vcpu_id, 
+			gpa, error_code, write ? "W" : (error_code & PFERR_FETCH_MASK ? "RI" : "R"),
+			kvm_rip_read(vcpu),
+			gfn, is_smm(vcpu), map_writable);
+#endif
+
+	// Should topup here.
+	dsm_access = kvm_dsm_vcpu_acquire_page(vcpu, &slot, gfn, write);
+	if (dsm_access < 0) {
+		kvm_release_pfn_clean(pfn);
+		return dsm_access;
+	}
+/* GVM add end */
+
 	r = RET_PF_RETRY;
 	spin_lock(&vcpu->kvm->mmu_lock);
 	if (mmu_notifier_retry(vcpu->kvm, mmu_seq))
@@ -4118,11 +4226,15 @@ static int direct_page_fault(struct kvm_vcpu *vcpu, gpa_t gpa, u32 error_code,
 	r = make_mmu_pages_available(vcpu);
 	if (r)
 		goto out_unlock;
+	/* GVM porting note, this used to be ACC_ALL, but is_tdp was added.
+	 * the is_tdp version was using dsm_access before.
+	 */
 	r = __direct_map(vcpu, gpa, write, map_writable, max_level, pfn,
-			 prefault, is_tdp && lpage_disallowed);
+			 prefault, is_tdp && lpage_disallowed, dsm_access); /* GVM add ACC_ALL */
 
 out_unlock:
 	spin_unlock(&vcpu->kvm->mmu_lock);
+	kvm_dsm_vcpu_release_page(vcpu, slot, gfn); /* GVM add */
 	kvm_release_pfn_clean(pfn);
 	return r;
 }
@@ -5233,7 +5345,7 @@ static u64 mmu_pte_write_fetch_gpte(struct kvm_vcpu *vcpu, gpa_t *gpa,
 				    int *bytes)
 {
 	u64 gentry = 0;
-	int r;
+	struct kvm_memory_slot *slot; /* GVM add and remove int r */
 
 	/*
 	 * Assume that the pte write on a page table of the same type
@@ -5247,9 +5359,15 @@ static u64 mmu_pte_write_fetch_gpte(struct kvm_vcpu *vcpu, gpa_t *gpa,
 	}
 
 	if (*bytes == 4 || *bytes == 8) {
-		r = kvm_vcpu_read_guest_atomic(vcpu, *gpa, &gentry, *bytes);
-		if (r)
+		/*
+		 * XXX: This is probably not necessary since we don't support Shadow
+		 * Page Table or Shadow EPT. Keep it in case we support them some day.
+		 */
+		if (kvm_dsm_vcpu_acquire_page(vcpu, &slot, *gpa >> PAGE_SHIFT, false) < 0) /* GVM add and move kvm_vcpu_read_guest into else */
 			gentry = 0;
+		else if (kvm_vcpu_read_guest_atomic(vcpu, *gpa, &gentry, *bytes)) /* GVM add */
+			gentry = 0; /* GVM add */
+		kvm_dsm_vcpu_release_page(vcpu, slot, *gpa >> PAGE_SHIFT); /* GVM add */
 	}
 
 	return gentry;
@@ -5973,6 +6091,16 @@ restart:
 void kvm_mmu_zap_collapsible_sptes(struct kvm *kvm,
 				   const struct kvm_memory_slot *memslot)
 {
+/* GVM add begin */
+#ifdef CONFIG_KVM_DSM
+	/* Large pages are disabled in DSM mode, so it is not necessary to zap the
+	 * so called "collapsible" sptes since they are not collapsible to large
+	 * pages any more. */
+	if (kvm->arch.dsm_enabled)
+		return;
+#endif
+/* GVM add end */
+
 	/* FIXME: const-ify all uses of struct kvm_memory_slot.  */
 	spin_lock(&kvm->mmu_lock);
 	slot_handle_leaf(kvm, (struct kvm_memory_slot *)memslot,
@@ -6163,6 +6291,7 @@ static struct shrinker mmu_shrinker = {
 
 static void mmu_destroy_caches(void)
 {
+	//dsm_info("pte_list_desc_cache=0x%p\n", pte_list_desc_cache);
 	kmem_cache_destroy(pte_list_desc_cache);
 	kmem_cache_destroy(mmu_page_header_cache);
 }
@@ -6258,6 +6387,7 @@ int kvm_mmu_module_init(void)
 					    0, SLAB_ACCOUNT, NULL);
 	if (!pte_list_desc_cache)
 		goto out;
+	//dsm_info("pte_list_desc_cache=0x%p", pte_list_desc_cache);
 
 	mmu_page_header_cache = kmem_cache_create("kvm_mmu_page_header",
 						  sizeof(struct kvm_mmu_page),

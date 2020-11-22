@@ -811,12 +811,12 @@ extern bool kvm_dsm_dbg_verbose;
 #endif
 
 #ifdef USE_KTCP_NETWORK
-	#include "ktcp.h"
+	#include "../../kvm/ktcp.h"
 	typedef struct socket kconnection_t;
 #endif
 
 #ifdef USE_KRDMA_NETWORK
-	#include "krdma.h"
+	#include "../../kvm/krdma.h"
 	typedef struct krdma_cb kconnection_t;
 #endif
 
@@ -894,10 +894,14 @@ struct kvm_dsm_info {
 #endif
 };
 
+struct kvm_dsm_rmap_head {
+	unsigned long val;
+};
+
 struct kvm_dsm_memory_slot {
 	hfn_t base_vfn;
 	unsigned long npages;
-	struct kvm_rmap_head *rmap;
+	struct kvm_dsm_rmap_head *rmap;
 	/*
 	 * gfn->vfn mapping exists in memslot. However, memslot can be modified on
 	 * the initialization period many times. Specifcally, create & delete memory
@@ -906,7 +910,7 @@ struct kvm_dsm_memory_slot {
 	 * find old vfn when new added memslot changes gfn->vfn mapping. We need to
 	 * copy old dsm state to new one to keep consistency.
 	 */
-	struct kvm_rmap_head *backup_rmap;
+	struct kvm_dsm_rmap_head *backup_rmap;
 	struct mutex *rmap_lock;
 	struct kvm_dsm_info *vfn_dsm_state;
 };
