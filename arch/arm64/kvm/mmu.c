@@ -377,7 +377,7 @@ static void __unmap_stage2_range(struct kvm_s2_mmu *mmu, phys_addr_t start, u64 
 	} while (pgd++, addr = next, addr != end);
 }
 
-static void unmap_stage2_range(struct kvm_s2_mmu *mmu, phys_addr_t start, u64 size)
+void unmap_stage2_range(struct kvm_s2_mmu *mmu, phys_addr_t start, u64 size)
 {
 	__unmap_stage2_range(mmu, start, size, true);
 }
@@ -1035,7 +1035,7 @@ int kvm_init_stage2_mmu(struct kvm *kvm, struct kvm_s2_mmu *mmu)
 	return 0;
 }
 
-static void stage2_unmap_memslot(struct kvm *kvm,
+void stage2_unmap_memslot(struct kvm *kvm,
 				 struct kvm_memory_slot *memslot)
 {
 	hva_t hva = memslot->userspace_addr;
@@ -1610,7 +1610,7 @@ static void  stage2_wp_p4ds(struct kvm_s2_mmu *mmu, pgd_t *pgd,
  * @addr:	Start address of range
  * @end:	End address of range
  */
-static void stage2_wp_range(struct kvm_s2_mmu *mmu, phys_addr_t addr, phys_addr_t end)
+void stage2_wp_range(struct kvm_s2_mmu *mmu, phys_addr_t addr, phys_addr_t end)
 {
 	struct kvm *kvm = mmu->kvm;
 	pgd_t *pgd;
@@ -1974,10 +1974,15 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 	// Seems like ivy_kvm_dsm_page_fault only returns what was given in write.
 	// Maybe try passing write_fault then setting writable based on the response ACC_WRITE?
 	if (kvm->arch.dsm_enabled) {
-		dsm_access = kvm_dsm_vcpu_acquire_page(vcpu, &slot, gfn, writable);
+		dsm_access = kvm_dsm_vcpu_acquire_page(vcpu, &slot, gfn, write_fault);
 		if (dsm_access < 0) {
 			kvm_release_pfn_clean(pfn);
 			return dsm_access;
+		}
+		if (dsm_access & ACC_WRITE_MASK) {
+			writable = true;
+		} else {
+			writable = false;
 		}
 	}
 /* GVM add end */
@@ -2171,6 +2176,7 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
 	hva = gfn_to_hva_memslot_prot(memslot, gfn, &writable);
 	write_fault = kvm_is_write_fault(vcpu);
 	if (kvm_is_error_hva(hva) || (write_fault && !writable)) {
+		kvm_info("%s: kvm_is_error_hva and write fault without wriable\n", __func__);
 		/*
 		 * The guest has put either its instructions or its page-tables
 		 * somewhere it shouldn't have. Userspace won't be able to do
@@ -2219,6 +2225,7 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
 	VM_BUG_ON(fault_ipa >= kvm_phys_size(vcpu->kvm));
 
 	if (fault_status == FSC_ACCESS) {
+		kvm_info("%s: fault_status == FSC_ACCESS\n", __func__);
 		handle_access_fault(vcpu, fault_ipa);
 		ret = 1;
 		goto out_unlock;

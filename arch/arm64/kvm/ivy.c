@@ -528,9 +528,9 @@ retry_handle_req:
 		}
 
 		dsm_debug_v("kvm[%d] received request[0x%x] from kvm[%d->%d] req_type[%s] "
-				"gfn[%llu,%d] vfn[%llu] version %d myversion %d\n",
+				"gfn[%llu,%d] gpa[0x%llX] vfn[%llu] version %d myversion %d\n",
 				kvm->arch.dsm_id, tx_add.txid, req.msg_sender, req.requester,
-				req_desc[req.req_type], req.gfn, req.is_smm, vfn, req.version,
+				req_desc[req.req_type], req.gfn, req.is_smm, req.gfn << PAGE_SHIFT, vfn, req.version,
 				dsm_get_version(slot, vfn));
 
 		BUG_ON(dsm_is_initial(slot, vfn) && dsm_get_prob_owner(slot, vfn) != 0);

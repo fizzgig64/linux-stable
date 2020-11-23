@@ -26,7 +26,7 @@
 #include <linux/mmu_context.h>
 
 #ifdef KVM_DSM_DEBUG
-bool kvm_dsm_dbg_verbose = 0;
+bool kvm_dsm_dbg_verbose = 1;
 #endif
 
 static int kvm_dsm_page_fault(struct kvm *kvm, struct kvm_memory_slot *memslot,
@@ -421,6 +421,11 @@ out:
 
 // HACK for arm64
 void stage2_flush_memslot(struct kvm *kvm, struct kvm_memory_slot *memslot);
+void stage2_unmap_memslot(struct kvm *kvm, struct kvm_memory_slot *memslot);
+void unmap_stage2_range(struct kvm_s2_mmu *mmu, phys_addr_t start, u64 size);
+void stage2_wp_range(struct kvm_s2_mmu *mmu, phys_addr_t addr, phys_addr_t end);
+
+
 void kvm_mmu_write_protect_pt_masked(struct kvm *kvm, struct kvm_memory_slot *slot, gfn_t gfn_offset, unsigned long mask);
 
 void kvm_dsm_apply_access_right(struct kvm *kvm,
@@ -461,15 +466,24 @@ void kvm_dsm_apply_access_right(struct kvm *kvm,
 				// TODO find solution for arm64
 				//rmap_head = (struct kvm_dsm_rmap_head *)__gfn_to_rmap(gfn, PG_LEVEL_4K, memslot);
 				//flush |= kvm_zap_rmapp(kvm, (struct kvm_rmap_head *)rmap_head);
-				stage2_flush_memslot(kvm, memslot);
+				dsm_debug_v("kvm[%d] flushing gfn=%llu gpa=0x%llX", kvm->arch.dsm_id,
+						gfn, gfn << PAGE_SHIFT);
+
+				//stage2_flush_memslot(kvm, memslot);
+				//stage2_unmap_memslot(kvm, memslot); // This will panic
+				unmap_stage2_range(&kvm->arch.mmu, gfn << PAGE_SHIFT, 4096);
 				flush = true;
 
 				break;
 			case DSM_SHARED: {
 				// TODO find solution for arm64
 				//flush |= kvm_mmu_slot_gfn_write_protect(kvm, memslot, gfn);
+				dsm_debug_v("kvm[%d] write protect gfn=%llu gpa=0x%llX", kvm->arch.dsm_id,
+						gfn, gfn << PAGE_SHIFT);
+
 				unsigned long mask = -1;
-				kvm_mmu_write_protect_pt_masked(kvm, memslot, gfn, mask);
+				//kvm_mmu_write_protect_pt_masked(kvm, memslot, gfn, mask);
+				stage2_wp_range(&kvm->arch.mmu, gfn << PAGE_SHIFT, (gfn << PAGE_SHIFT) + 4096);
 				flush = true;
 
 				break;

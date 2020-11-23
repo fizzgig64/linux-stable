@@ -895,7 +895,7 @@ static int vcpu_interrupt_line(struct kvm_vcpu *vcpu, int number, bool level)
 	if (set == level)
 		return 0;
 
-	//kvm_info("%s: vcpu_idx=%d vcpu_id=%d number=%d level=%d will kick cpu\n", __func__, vcpu->vcpu_idx, vcpu->vcpu_id, number, (level) ? 1 : 0);
+	//kvm_info("%s: vcpu_idx=%d number=%d level=%d will kick cpu\n", __func__, vcpu->vcpu_idx, vcpu->vcpu_id, number, (level) ? 1 : 0);
 
 	/*
 	 * The vcpu irq_lines field was updated, wake up sleeping VCPUs and
@@ -924,7 +924,10 @@ int kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_irq_level *irq_level,
 
 	trace_kvm_irq_line(irq_type, vcpu_idx, irq_num, irq_level->level);
 
-	//kvm_info("%s: vcpu_idx=%u irq=%u irq_type=%u irq_num=%u\n", __func__, vcpu_idx, irq, irq_type, irq_num);
+	vcpu = kvm_get_vcpu(kvm, vcpu_idx);
+	if (vcpu) {
+		//kvm_info("%s: vcpu=%p vcpu_idx=%u irq=%u irq_type=%u irq_num=%u\n", __func__, vcpu, vcpu_idx, irq, irq_type, irq_num);
+	}
 
 	switch (irq_type) {
 	case KVM_ARM_IRQ_TYPE_CPU:
@@ -934,7 +937,6 @@ int kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_irq_level *irq_level,
 		if (vcpu_idx >= nrcpus)
 			return -EINVAL;
 
-		vcpu = kvm_get_vcpu(kvm, vcpu_idx);
 		if (!vcpu)
 			return -EINVAL;
 
@@ -949,7 +951,6 @@ int kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_irq_level *irq_level,
 		if (vcpu_idx >= nrcpus)
 			return -EINVAL;
 
-		vcpu = kvm_get_vcpu(kvm, vcpu_idx);
 		if (!vcpu)
 			return -EINVAL;
 
