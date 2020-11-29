@@ -2176,7 +2176,7 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
 	hva = gfn_to_hva_memslot_prot(memslot, gfn, &writable);
 	write_fault = kvm_is_write_fault(vcpu);
 	if (kvm_is_error_hva(hva) || (write_fault && !writable)) {
-		kvm_info("%s: kvm_is_error_hva and write fault without wriable\n", __func__);
+		//kvm_info("%s: kvm_is_error_hva and write fault without wriable\n", __func__);
 		/*
 		 * The guest has put either its instructions or its page-tables
 		 * somewhere it shouldn't have. Userspace won't be able to do
@@ -2225,7 +2225,7 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
 	VM_BUG_ON(fault_ipa >= kvm_phys_size(vcpu->kvm));
 
 	if (fault_status == FSC_ACCESS) {
-		kvm_info("%s: fault_status == FSC_ACCESS\n", __func__);
+		//kvm_info("%s: fault_status == FSC_ACCESS\n", __func__);
 		handle_access_fault(vcpu, fault_ipa);
 		ret = 1;
 		goto out_unlock;

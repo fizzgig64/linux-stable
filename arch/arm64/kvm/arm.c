@@ -358,8 +358,10 @@ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 		kvm_vcpu_load_sysregs_vhe(vcpu);
 	kvm_arch_vcpu_load_fp(vcpu);
 	kvm_vcpu_pmu_restore_guest(vcpu);
-	if (kvm_arm_is_pvtime_enabled(&vcpu->arch))
+	if (kvm_arm_is_pvtime_enabled(&vcpu->arch)) {
+		kvm_info("%s: will make KVM_REQ_RECORD_STEAL\n", __func__);
 		kvm_make_request(KVM_REQ_RECORD_STEAL, vcpu);
+	}
 
 	if (single_task_running())
 		vcpu_clear_wfx_traps(vcpu);
